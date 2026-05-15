@@ -1,44 +1,37 @@
-// win32-specific socket and multithreaded functionality
+// Cross-platform socket and multithreaded trace log streaming.
 //
-// 3 threads work together to deal with the insane volume of data generated from a non-tracemasked binary output:
-// 1) main thread (emulation normal thread). creates buffers with a few hundred trace items in them,
-//    sends a big batch over to compression thread
-// 2) compression thread: uses zlib [badly] to compress buffer batches, puts in queue for sending via network
-// 3) socket sending thread: receives compressed buffers and sends to the network
+// 3 threads work together to handle the volume of data from binary trace output:
+// 1) main thread (emulation thread): batches trace items into ByteBuffers and hands
+//    them to the compression thread.
+// 2) compression thread: zlib-compresses each buffer and queues it for sending.
+// 3) socket send thread: sends compressed buffers over TCP to DiztinGUIsh.
 //
-// The entire system's output speed is currently limited by the ability to send the compressed data, or the ability to
-// compress data fast enough.  With tracemasking on, we greatly reduce stuff being output and performance is a piece
-// of cake.  With tracemasking off, the full firehose is sent through this pipeline. This implementation achieves
-// ~45FPS realtime sending to an external client. That's not too shabby.  Emulation is paused if network transmission is
-// too slow to keep up with our volume of data, so the end result is a limiting effect on max FPS.
+// Achieves ~45 FPS realtime with tracing enabled. With trace masking on, performance
+// is a non-issue. Without masking the full firehose goes through this pipeline.
+// Emulation pauses if the network can't keep up, which limits max FPS rather than
+// losing data.
 //
-// Previous text-only implementations written to disk crawled at around 2FPS when tracing was enabled. This implementation
-// allows minimal impact on a user, so large volumes of data can be logged with an external tool (Like "Diztinguish")
-//
-// This entire class was hacked together and surely could be tuned better, and with a non-platform-specific
-// threading and socket-implementation.
-//
-//
-// TODO: demo: proof of concept only. for merging, use (probably) QtNetwork instead for cross-platform
-// and better async IO notifications so UI doesn't block. for now, it's good enough to demo the idea.
-//
-// TODO: There are multiple classes in here, break them out.
+// Threading: std::thread / std::mutex / std::condition_variable (C++11, all platforms).
+// Sockets:   POSIX BSD socket API on Linux/macOS; Winsock2 on Windows (same API,
+//            thin platform macros in w32_socket.h absorb the differences).
 
 #include "w32_socket.h"
+#include <chrono>
+#include <zlib/zlib.h>
 
-inline QTextStream& qStdout()
-{
-    // TODO: use real logging, this is a hack. it doesn't even really work
+inline QTextStream& qStdout() {
     static QTextStream r{stdout};
     return r;
 }
 
+// ---------------------------------------------------------------------------
+// SocketServer
+// ---------------------------------------------------------------------------
+
 void SocketServer::ReportError(const char *errorMsg, bool printLastError) {
     qStdout() << "Error: " << errorMsg;
-
     if (printLastError)
-        qStdout() << " (error# " << WSAGetLastError() << ")";
-
+        qStdout() << " (error# " << SOCK_LAST_ERROR() << ")";
     qStdout() << endl;
 }
 
@@ -51,55 +44,31 @@ void SocketServer::Shutdown() {
     if (!ClientHadConnected())
         return;
 
-    int iResult = shutdown(_clientSocket, SD_SEND);
-    if (iResult == SOCKET_ERROR) {
-        ReportError("Shutdown");
-    }
-
-    closesocket(_clientSocket);
-    _clientSocket = INVALID_SOCKET;
-    WSACleanup();
+    SOCK_SHUTDOWN(_clientSocket);
+    SOCK_CLOSE(_clientSocket);
+    _clientSocket = INVALID_SOCK_VAL;
+    sock_platform_cleanup();
 }
 
-// Perf: This function is tuned to be able to run basically in realtime with the emulation now.
-//
-// If even THAT is even too slow, try the following for speedups:
-// 1) Switch from TCP to UDP or Unix domain sockets
-// 2) Make sure both side of the connection are always running locally (not across a real network, especially not wifi)
-// 3) Add a separate thread and push bytes to it, let the other thread deal with the slight delays on the IO
-// 4) Make sure client is able to read data fast enough so we don't fill up the system buffer and block.
-// 5) Switch all this over to a shared memory buffer or memory mapped file implementation
-//
-// batch up bytes in a buffer for sending to the network.
-// things are faster if we minimize the # of send() calls, so queue up a lot of data first
-// before allowing it to send.
-//
-// returns true if we queued or sent the data.
-// returns false if we were unable to queue or send this data. try again later?
 bool SocketServer::Send(const uint8_t* buf, int len, bool &shouldRetryOut) {
     shouldRetryOut = false;
 
     if (!ClientHadConnected() || len == 0 || !buf)
         return false;
 
-    // blocks if AsyncIO is disabled (default).
-    // this is OK because we're on a dedicated sending thread
-    // this function is called HEAVILY and tuning buffer size is key to performance improvements
-    int iSendResult = send(_clientSocket, (const char *)(buf), len, 0);
-
-    if (iSendResult != SOCKET_ERROR)
+    int iResult = (int)send(_clientSocket, (const char*)buf, len, 0);
+    if (iResult != SOCK_ERROR_VAL)
         return true;
 
-    int lastError = WSAGetLastError();
-    if (lastError == WSAENOBUFS || lastError == WSAEWOULDBLOCK) {
+    int err = SOCK_LAST_ERROR();
+    if (err == SOCK_NOBUFS || err == SOCK_WOULDBLOCK) {
         shouldRetryOut = true;
-    } else if (lastError == WSAECONNRESET) {
+    } else if (err == SOCK_CONNRESET) {
         shouldRetryOut = true;
         Die("Connection reset");
     } else {
         Die("Send failed.");
     }
-
     return false;
 }
 
@@ -107,39 +76,34 @@ bool SocketServer::WaitForClientConnect(const char* servname) {
     if (ClientHadConnected())
         return true;
 
-    SOCKET ListenSocket = INVALID_SOCKET;
-    struct addrinfo *result = NULL;
+    socket_t listenSocket = INVALID_SOCK_VAL;
+    struct addrinfo *result = nullptr;
 
     bool success =
-        DoOpen(servname, ListenSocket, result) &&
-        BlockAndWaitForClientConnect(ListenSocket);
+        DoOpen(servname, listenSocket, result) &&
+        BlockAndWaitForClientConnect(listenSocket);
 
-    // pretty sure I'm doing this wrong and we should hang onto listening socket and wait for other connectons on it
-    if (ListenSocket != INVALID_SOCKET) {
-        closesocket(ListenSocket);
-    }
+    if (listenSocket != INVALID_SOCK_VAL)
+        SOCK_CLOSE(listenSocket);
 
     if (result)
-        freeaddrinfo(result); // todo: move above? i think. yea.
+        freeaddrinfo(result);
 
     if (success)
         return true;
 
-    WSACleanup();
-    if (_clientSocket)
-        closesocket(_clientSocket);
-
+    sock_platform_cleanup();
+    if (ClientHadConnected())
+        SOCK_CLOSE(_clientSocket);
     return false;
 }
 
-bool SocketServer::BlockAndWaitForClientConnect(SOCKET listenSocket, bool enableAsyncIO)
-{
-    // TODO: this blocks til a client connects. temporary demo / *not very friendly* way to do this.
-    // what we should do instead is pause emulation (but not the UI) and then get notified when a client connects.
-    // when that happens, unpause emulation and write the trace data to the socket.
-    _clientSocket = accept(listenSocket, NULL, NULL);
+bool SocketServer::BlockAndWaitForClientConnect(socket_t listenSocket, bool enableAsyncIO) {
+    // TODO: blocks until a client connects. A better approach would pause emulation
+    // (but not the UI), then unpause when a client connects.
+    _clientSocket = accept(listenSocket, nullptr, nullptr);
 
-    if (_clientSocket == INVALID_SOCKET) {
+    if (_clientSocket == INVALID_SOCK_VAL) {
         ReportError("accept() failed");
         return false;
     }
@@ -150,43 +114,33 @@ bool SocketServer::BlockAndWaitForClientConnect(SOCKET listenSocket, bool enable
     return true;
 }
 
-bool SocketServer::DoOpen(const char *servname, SOCKET &ListenSocket, addrinfo *&result)
-{
-    WSADATA wsaData;
-    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iResult != 0) {
-        Die("WSAStartup() failed");
-        return false;
-    }
+bool SocketServer::DoOpen(const char *servname, socket_t &listenSocket, struct addrinfo *&result) {
+    sock_platform_init();
 
     struct addrinfo hints;
-    ZeroMemory(&hints, sizeof(hints));
-
-    hints.ai_family = AF_UNSPEC;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_flags = AI_PASSIVE;
+    hints.ai_flags    = AI_PASSIVE;
 
-    iResult = getaddrinfo(NULL, servname, &hints, &result);
-    if (iResult != 0) {
-        ReportError("getaddrinfo() failed");
+    if (getaddrinfo(nullptr, servname, &hints, &result) != 0) {
+        ReportError("getaddrinfo() failed", false);
         return false;
     }
 
-    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (ListenSocket == INVALID_SOCKET) {
+    listenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (listenSocket == INVALID_SOCK_VAL) {
         ReportError("socket() failed");
         return false;
     }
 
-    iResult = bind(ListenSocket, result->ai_addr, (int) result->ai_addrlen); // Setup the TCP listening socket
-    if (iResult == SOCKET_ERROR) {
+    if (bind(listenSocket, result->ai_addr, (int)result->ai_addrlen) == SOCK_ERROR_VAL) {
         ReportError("bind() failed");
         return false;
     }
 
-    iResult = listen(ListenSocket, SOMAXCONN);
-    if (iResult == SOCKET_ERROR) {
+    if (listen(listenSocket, SOMAXCONN) == SOCK_ERROR_VAL) {
         ReportError("listen() failed");
         return false;
     }
@@ -195,16 +149,22 @@ bool SocketServer::DoOpen(const char *servname, SOCKET &ListenSocket, addrinfo *
 }
 
 void SocketServer::EnableAsyncIO() const {
-    // 1 to enable non-blocking socket writes (doesn't return immediately, just won't block)
-    u_long ioctl_mode = 1;
-    ioctlsocket(_clientSocket, FIONBIO, &ioctl_mode);
+#ifdef _WIN32
+    u_long mode = 1;
+    ioctlsocket(_clientSocket, FIONBIO, &mode);
+#else
+    int flags = fcntl(_clientSocket, F_GETFL, 0);
+    fcntl(_clientSocket, F_SETFL, flags | O_NONBLOCK);
+#endif
 }
 
 bool SocketServer::ClientHadConnected() const {
-    return _clientSocket != INVALID_SOCKET;
+    return _clientSocket != INVALID_SOCK_VAL;
 }
 
-// ----------------------------------------------------
+// ---------------------------------------------------------------------------
+// ByteBuffer
+// ---------------------------------------------------------------------------
 
 bool ByteBuffer::CanAdd(int len) {
     return _bufferLenUsed + len <= _maxSize;
@@ -217,7 +177,6 @@ void ByteBuffer::Clear() {
 bool ByteBuffer::Append(const uint8_t* buf, int len) {
     if (!CanAdd(len))
         return false;
-
     memcpy(_buffer + _bufferLenUsed, buf, len);
     _bufferLenUsed += len;
     return true;
@@ -230,7 +189,9 @@ ByteBuffer::ByteBuffer(const ByteBuffer &from) {
     _bufferLenUsed = from._bufferLenUsed;
 }
 
-// -----------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// BufferedServer
+// ---------------------------------------------------------------------------
 
 bool BufferedServer::Init(const char* servName) {
     if (_initialized)
@@ -238,7 +199,6 @@ bool BufferedServer::Init(const char* servName) {
 
     _workingBuffer.Clear();
     _initialized = true;
-
     return _thread.Init(servName);
 }
 
@@ -261,9 +221,7 @@ void BufferedServer::Shutdown() {
         return;
 
     FlushWorkingBuffer();
-
     _thread.Shutdown();
-
     _workingBuffer.Clear();
     _initialized = false;
 }
@@ -275,309 +233,195 @@ bool BufferedServer::Push(const uint8_t* buf, int len) {
     if (len > _workingBuffer._maxSize)
         return false;
 
-    while (!_workingBuffer.Append(buf, len)) {
+    while (!_workingBuffer.Append(buf, len))
         FlushWorkingBuffer();
-    }
 
     return true;
 }
 
-ThreadedSocketServer* ThreadedSocketServer::_threadedSocketServer = NULL;
+// ---------------------------------------------------------------------------
+// ThreadedSocketServer
+// ---------------------------------------------------------------------------
 
-DWORD WINAPI CompressThreadProc(void*) {
-    ThreadedSocketServer* ts = ThreadedSocketServer::_threadedSocketServer;
+ThreadedSocketServer::ThreadedSocketServer() {}
 
-    if (ts)
-        ts->CompressThreadMain();
-
-    return 0;
-}
-
-DWORD WINAPI SendThreadProc(void*) {
-    ThreadedSocketServer* ts = ThreadedSocketServer::_threadedSocketServer;
-
-    if (ts)
-        ts->SendThreadMain();
-
-    return 0;
+ThreadedSocketServer::~ThreadedSocketServer() {
+    Shutdown();
 }
 
 bool ThreadedSocketServer::Init(const char *servName) {
-    if (_compressThreadID != INVALID_HANDLE_VALUE)
+    if (_compressThread.joinable())
         return false;
 
     _servName = servName;
+    _compressThreadShouldContinue = true;
+    _sendThreadShouldContinue     = true;
 
-    _compressQueueMutex = CreateMutex(
-            NULL,              // default security attributes
-            FALSE,             // initially not owned
-            NULL);             // unnamed mutex
-
-    _compressQueueItemAdded = CreateEvent(
-            NULL,
-            FALSE,              // = auto-reset event
-            FALSE,              // initial state is nonsignaled
-            NULL
-    );
-
-    _compressQueueOKToAdd = CreateEvent(
-            NULL,
-            TRUE,              // manual reset event
-            TRUE,             // initial state is signalled
-            NULL
-    );
-
-    _sendQueueMutex = CreateMutex(
-            NULL,              // default security attributes
-            FALSE,             // initially not owned
-            NULL);             // unnamed mutex
-
-
-    _sendQueueItemAdded = CreateEvent(
-            NULL,
-            FALSE,              // = auto-reset event
-            FALSE,              // initial state is nonsignaled
-            NULL
-    );
-
-    _sendQueueOKToAdd = CreateEvent(
-            NULL,
-            TRUE,              // manual reset event
-            TRUE,             // initial state is signalled
-            NULL
-    );
-
-    _compressThreadShouldContinue = _sendThreadShouldContinue = true;
-    _threadedSocketServer = this;
-
-    _compressThreadID = CreateThread(NULL, 0, CompressThreadProc, 0, 0, NULL);
-    _sendThreadID = CreateThread(NULL, 0, SendThreadProc, 0, 0, NULL);
+    _compressThread = std::thread([this]{ CompressThreadMain(); });
+    _sendThread     = std::thread([this]{ SendThreadMain(); });
 
     return true;
 }
 
-// call from main thread
 void ThreadedSocketServer::Shutdown() {
     _compressThreadShouldContinue = false;
-    _sendThreadShouldContinue = false;
+    _sendThreadShouldContinue     = false;
 
-    if (_compressThreadID != INVALID_HANDLE_VALUE) {
-        WaitForSingleObject(_compressThreadID, INFINITE);
-        CloseHandle(_compressThreadID);
-    }
+    // Wake any threads blocked on condition variables so they can observe the
+    // stop flags and exit cleanly.
+    _compressQueueItemAdded.notify_all();
+    _compressQueueOKToAdd.notify_all();
+    _sendQueueItemAdded.notify_all();
+    _sendQueueOKToAdd.notify_all();
 
-    if (_sendThreadID != INVALID_HANDLE_VALUE) {
-        WaitForSingleObject(_sendThreadID, INFINITE);
-        CloseHandle(_sendThreadID);
-    }
-
-    // ----------------
-
-    if (_compressQueueMutex != INVALID_HANDLE_VALUE)
-        CloseHandle(_compressQueueMutex);
-
-    if (_compressQueueItemAdded != INVALID_HANDLE_VALUE)
-        CloseHandle(_compressQueueItemAdded);
-
-    if (_compressQueueOKToAdd = INVALID_HANDLE_VALUE)
-        CloseHandle(_compressQueueOKToAdd);
-
-
-    if (_sendQueueMutex != INVALID_HANDLE_VALUE)
-        CloseHandle(_sendQueueMutex);
-
-    if (_sendQueueItemAdded != INVALID_HANDLE_VALUE)
-        CloseHandle(_sendQueueItemAdded);
-
-    if (_sendQueueOKToAdd = INVALID_HANDLE_VALUE)
-        CloseHandle(_sendQueueOKToAdd);
-
-    _compressThreadID = _compressQueueMutex = _compressQueueItemAdded = _compressQueueOKToAdd = INVALID_HANDLE_VALUE;
-    _sendThreadID = _sendQueueMutex = _sendQueueItemAdded = _sendQueueOKToAdd = INVALID_HANDLE_VALUE;
-
-    ThreadedSocketServer::_threadedSocketServer = NULL;
+    if (_compressThread.joinable()) _compressThread.join();
+    if (_sendThread.joinable())     _sendThread.join();
 }
 
-// call from main thread (producer)
-bool ThreadedSocketServer::Push(ByteBuffer &_buffer) {
-
-    HANDLE events[2];
-    events[0] = _compressQueueMutex;
-    events[1] = _compressQueueOKToAdd;
-
-    // NOTE: this can block the main thread here if socket can't keep up, resulting in emulation stutter.
-    // that's probably the right call, but, we could also discard data if we didn't care about completeness
-    // and were going more for sampling.
-    if (WaitForMultipleObjects(2, events, true, INFINITE)  != WAIT_OBJECT_0)
-        return false;
-    _readyToCompressQueue.push(_buffer);
-
-    if (_readyToCompressQueue.size() >= _maxQueueLengthAllowed)
-        ResetEvent(_compressQueueOKToAdd);
-
-    ReleaseMutex(_compressQueueMutex);
-
-    SetEvent(_compressQueueItemAdded);
-
+// Called from main thread (producer).
+bool ThreadedSocketServer::Push(ByteBuffer &buffer) {
+    {
+        std::unique_lock<std::mutex> lock(_compressQueueMutex);
+        // Block if the queue is full; unblock when the compress thread drains an item
+        // or when we're shutting down.
+        _compressQueueOKToAdd.wait(lock, [this]{
+            return (int)_readyToCompressQueue.size() < _maxQueueLengthAllowed
+                || !_compressThreadShouldContinue;
+        });
+        if (!_compressThreadShouldContinue)
+            return false;
+        _readyToCompressQueue.push(buffer);
+    }
+    _compressQueueItemAdded.notify_one();
     return true;
 }
 
-#include <zlib/zlib.h>
-
-// call on compress worker thread
-// return false to kill the thread.
+// Called from compress thread. Pops one buffer, compresses it, hands to send queue.
 bool ThreadedSocketServer::ProcessNextCompressedItem() {
+    ByteBuffer buffer;
 
-    // get latest off the queue, if we can
-    if (WaitForSingleObject(_compressQueueMutex, 500) != WAIT_OBJECT_0)
-        return true; // go around again.
-    ByteBuffer buffer = _readyToCompressQueue.front();
-    _readyToCompressQueue.pop();
-    SetEvent(_compressQueueOKToAdd);
-    ReleaseMutex(_compressQueueMutex);
+    {
+        std::unique_lock<std::mutex> lock(_compressQueueMutex);
+        bool hasItem = _compressQueueItemAdded.wait_for(lock, std::chrono::milliseconds(500),
+            [this]{ return !_readyToCompressQueue.empty() || !_compressThreadShouldContinue; });
 
-    // ------------------------------------------------------------------------------------------------
-    // compress
-    // perf: takes longer than realtime to shove these bytes into a socket.
-    // spend CPU time to reduce the amount of bytes that need to go out, and hopefully reduce jittering
-    // ------------------------------------------------------------------------------------------------
+        if (!hasItem)
+            return true; // timeout — loop and try again
 
-    // TODO: all this casting from Bytef and char* can likely be simplified
+        if (_readyToCompressQueue.empty())
+            return false; // shutting down, nothing left
 
-    // COMPRESS BUFFER ASSUMPTION for zlib:
-    // data must start out being AT LEAST 0.1% larger than
-    // the original size of the data, + 12 extra bytes.
-    // So, we'll just play it safe and alloated 1.1x
-    // as much memory + 12 bytes (110% original + 12 bytes)
-    const int headerSize = 1 + sizeof(ULONG) + sizeof(ULONG);
+        buffer = std::move(_readyToCompressQueue.front());
+        _readyToCompressQueue.pop();
+    }
+    _compressQueueOKToAdd.notify_one();
 
-    ULONG zlibCompressBufferSize = (ByteBuffer::_maxSize * 1.1) + 12;
-    ULONG packetFullSize = zlibCompressBufferSize + headerSize;
+    // -------------------------------------------------------------------------
+    // Compress the buffer.
+    // zlib requires the output buffer to be at least 1.1x the input + 12 bytes.
+    // -------------------------------------------------------------------------
+    const int headerSize = 1 + sizeof(uint32_t) + sizeof(uint32_t); // 'Z' + orig_len + comp_len
 
-    Bytef* packetBuffer = new Bytef[packetFullSize];
+    uLong zlibCompressBufferSize = (uLong)(ByteBuffer::_maxSize * 1.1f) + 12;
+    uLong packetFullSize         = zlibCompressBufferSize + headerSize;
 
-    // create a pointer inside packetBuffer to just the compressed data (it starts after our header)
+    Bytef* packetBuffer      = new Bytef[packetFullSize];
     Bytef* zlibCompressBuffer = packetBuffer + headerSize;
 
-    ULONG zlibCompressedDataSizeOut = zlibCompressBufferSize;
+    uLong zlibCompressedDataSizeOut = zlibCompressBufferSize;
+    int z_result = compress(zlibCompressBuffer, &zlibCompressedDataSizeOut,
+                            reinterpret_cast<const Bytef*>(buffer._buffer),
+                            buffer._bufferLenUsed);
 
-    int z_result = compress(zlibCompressBuffer, &zlibCompressedDataSizeOut, reinterpret_cast<const Bytef*>(buffer._buffer), buffer._bufferLenUsed);
-
-    if (z_result == Z_MEM_ERROR || z_result == Z_BUF_ERROR)
+    if (z_result == Z_MEM_ERROR || z_result == Z_BUF_ERROR) {
+        delete[] packetBuffer;
         return false;
+    }
 
-    // populate the header:
-    packetBuffer[0] = 'Z'; // watermark saying this is a compressed bit of data coming up
-
-    packetBuffer[1] = (buffer._bufferLenUsed >> 0) & 0xFF; // store length of original data
-    packetBuffer[2] = (buffer._bufferLenUsed >> 8) & 0xFF;
+    // Packet header: 1-byte marker + 4-byte original length + 4-byte compressed length
+    packetBuffer[0] = 'Z';
+    packetBuffer[1] = (buffer._bufferLenUsed >> 0)  & 0xFF;
+    packetBuffer[2] = (buffer._bufferLenUsed >> 8)  & 0xFF;
     packetBuffer[3] = (buffer._bufferLenUsed >> 16) & 0xFF;
     packetBuffer[4] = (buffer._bufferLenUsed >> 24) & 0xFF;
-
-    packetBuffer[5] = (zlibCompressedDataSizeOut >> 0) & 0xFF; // store length of compressed data that follows
-    packetBuffer[6] = (zlibCompressedDataSizeOut >> 8) & 0xFF;
+    packetBuffer[5] = (zlibCompressedDataSizeOut >> 0)  & 0xFF;
+    packetBuffer[6] = (zlibCompressedDataSizeOut >> 8)  & 0xFF;
     packetBuffer[7] = (zlibCompressedDataSizeOut >> 16) & 0xFF;
     packetBuffer[8] = (zlibCompressedDataSizeOut >> 24) & 0xFF;
 
-    int len = headerSize + zlibCompressedDataSizeOut;
-    bool result = PushDecompressedData(reinterpret_cast<const uint8_t*>(packetBuffer), len);
-
-    return result;
+    int len = headerSize + (int)zlibCompressedDataSizeOut;
+    return PushDecompressedData(reinterpret_cast<const uint8_t*>(packetBuffer), len);
 }
 
-// call from compress worker thread
-bool ThreadedSocketServer::PushDecompressedData(const uint8_t* buffer, int len) {
-    HANDLE events[2];
-    events[0] = _sendQueueMutex;
-    events[1] = _sendQueueOKToAdd;
-
-    // NOTE: this can block if sending socket can't keep up, resulting in emulation stutter.
-    if (WaitForMultipleObjects(2, events, true, INFINITE)  != WAIT_OBJECT_0)
-        return false;
-    _readyToSendQueue.push(std::make_tuple(len, buffer));
-
-    if (_readyToSendQueue.size() >= _maxQueueLengthAllowed)
-        ResetEvent(_sendQueueOKToAdd);
-
-    ReleaseMutex(_sendQueueMutex);
-
-    SetEvent(_sendQueueItemAdded);
+// Called from compress thread. Queues a compressed packet for the send thread.
+bool ThreadedSocketServer::PushDecompressedData(const uint8_t *buffer, int len) {
+    {
+        std::unique_lock<std::mutex> lock(_sendQueueMutex);
+        _sendQueueOKToAdd.wait(lock, [this]{
+            return (int)_readyToSendQueue.size() < _maxQueueLengthAllowed
+                || !_sendThreadShouldContinue;
+        });
+        if (!_sendThreadShouldContinue)
+            return false;
+        _readyToSendQueue.push(std::make_tuple(len, buffer));
+    }
+    _sendQueueItemAdded.notify_one();
     return true;
 }
 
-// socket thread
+// Called from send thread. Pops one compressed packet and sends it over the socket.
 bool ThreadedSocketServer::ProcessNextDecompressedItem() {
-    // get latest off the queue, if we can
-    if (WaitForSingleObject(_sendQueueMutex, 500) != WAIT_OBJECT_0)
-        return true; // go around again.
-    auto item = _readyToSendQueue.front();
-    _readyToSendQueue.pop();
-    SetEvent(_sendQueueOKToAdd);
-    ReleaseMutex(_sendQueueMutex);
+    int len = 0;
+    const uint8_t* buffer = nullptr;
 
-    auto len=std::get<0>(item);
-    auto buffer=reinterpret_cast<const uint8_t*>(std::get<1>(item));
+    {
+        std::unique_lock<std::mutex> lock(_sendQueueMutex);
+        bool hasItem = _sendQueueItemAdded.wait_for(lock, std::chrono::milliseconds(500),
+            [this]{ return !_readyToSendQueue.empty() || !_sendThreadShouldContinue; });
+
+        if (!hasItem)
+            return true; // timeout
+
+        if (_readyToSendQueue.empty())
+            return false; // shutting down
+
+        auto& item = _readyToSendQueue.front();
+        len    = std::get<0>(item);
+        buffer = std::get<1>(item);
+        _readyToSendQueue.pop();
+    }
+    _sendQueueOKToAdd.notify_one();
 
     bool result = SendBuffer(buffer, len);
-
-    delete reinterpret_cast<const Bytef*>(buffer);
-
+    delete[] reinterpret_cast<const Bytef*>(buffer);
     return result;
 }
 
-// call on socket thread
+// Called from send thread.
 bool ThreadedSocketServer::SendBuffer(const uint8_t* buffer, int len) {
-    // this sequence could probably use a better coat of paint
-
-    const int delay_time_ns = 500;
-    bool shouldRetry, sent=false;
+    bool shouldRetry, sent = false;
 
     do {
-        if (!_socketServer.WaitForClientConnect(_servName))
+        if (!_socketServer.WaitForClientConnect(_servName.c_str()))
             return true;
 
-        if (_socketServer.Send(buffer, len, shouldRetry)) {
-            sent=true;
-        }
+        if (_socketServer.Send(buffer, len, shouldRetry))
+            sent = true;
 
-        if (shouldRetry) {
-            // NOTE: DUMB WAY TO HANDLE THIS, use select() instead or overlapped IO stuff probably.
-            usleep(delay_time_ns);
-        }
-    } while (shouldRetry && _compressThreadShouldContinue);
+        if (shouldRetry)
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
 
-    // don't return false here if we disconnected, just try again.
+    } while (shouldRetry && _sendThreadShouldContinue);
+
     return sent;
 }
 
-// call on compress thread
 bool ThreadedSocketServer::WaitForCompressQueueWrite() {
-    DWORD result = WaitForSingleObject(_compressQueueItemAdded, 500);
-
-    if (result == WAIT_OBJECT_0) {
-        return ProcessNextCompressedItem();
-    } else if (result == WAIT_TIMEOUT) {
-        // timeout, just fall through, try again.
-        return true;
-    } else {
-        // error
-        return false;
-    }
+    return ProcessNextCompressedItem();
 }
 
-// call on compress thread
 bool ThreadedSocketServer::WaitForSendQueueWrite() {
-    DWORD result = WaitForSingleObject(_sendQueueItemAdded, 500);
-
-    if (result == WAIT_OBJECT_0) {
-        return ProcessNextDecompressedItem();
-    } else if (result == WAIT_TIMEOUT) {
-        // timeout, just fall through, try again.
-        return true;
-    } else {
-        // error
-        return false;
-    }
+    return ProcessNextDecompressedItem();
 }
 
 void ThreadedSocketServer::CompressThreadMain() {
@@ -588,7 +432,7 @@ void ThreadedSocketServer::CompressThreadMain() {
 }
 
 void ThreadedSocketServer::SendThreadMain() {
-    if (!_socketServer.WaitForClientConnect(_servName))
+    if (!_socketServer.WaitForClientConnect(_servName.c_str()))
         return;
 
     while (_sendThreadShouldContinue) {
@@ -597,11 +441,4 @@ void ThreadedSocketServer::SendThreadMain() {
     }
 
     _socketServer.Shutdown();
-}
-
-ThreadedSocketServer::ThreadedSocketServer() {
-}
-
-ThreadedSocketServer::~ThreadedSocketServer() {
-    Shutdown();
 }

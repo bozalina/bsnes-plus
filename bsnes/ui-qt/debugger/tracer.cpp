@@ -1,4 +1,5 @@
 #include "tracer.moc"
+#include <nall/snes/cpu.hpp>
 Tracer *tracer;
 
 #include "w32_socket.cpp"
@@ -102,14 +103,71 @@ void Tracer::outputSgbTrace() {
 }
 
 void Tracer::stepCpu() {
-  if(traceCpu) {
-    unsigned addr = SNES::cpu.regs.pc;
-    if(!traceMask || !(traceMaskCPU[addr >> 3] & (0x80 >> (addr & 7)))) {
-        outputCpuTrace();
+  if (!traceCpu) return;
+
+  uint32_t pc = SNES::cpu.regs.pc;
+
+#if defined(DEBUGGER)
+  int32_t woff = wramOffset(pc);
+  if (woff >= 0) {
+    uint32_t romAddr = SNES::cpu.wramShadow[woff];
+    if (romAddr != SHADOW_SENTINEL && wramOffset(romAddr) < 0) {
+      if (!traceMask || !(traceMaskCPU[romAddr >> 3] & (0x80 >> (romAddr & 7)))) {
+        char buf[256]; int len;
+        if (traceOutputFormatIsText) {
+          SNES::cpu.disassemble_opcode(buf, romAddr, config().debugger.showHClocks);
+          len = strlen(buf) + 1;
+        } else {
+          SNES::cpu.disassemble_opcode_bin(buf, romAddr, len);
+        }
+        outputTrace(buf, len);
+        checkSplitSource(pc, romAddr);
+      }
+      traceMaskCPU[romAddr >> 3] |= 0x80 >> (romAddr & 7);
+      return;
     }
-    traceMaskCPU[addr >> 3] |= 0x80 >> (addr & 7);
+    // WRAM PC with no ROM provenance — skip (data region, not copied code)
+    return;
+  }
+#endif
+
+  if (!traceMask || !(traceMaskCPU[pc >> 3] & (0x80 >> (pc & 7)))) {
+    outputCpuTrace();
+  }
+  traceMaskCPU[pc >> 3] |= 0x80 >> (pc & 7);
+}
+
+#if defined(DEBUGGER)
+void Tracer::outputPatchRecord(uint32_t templateAddr, uint32_t sourceAddr) {
+  char buf[8];
+  buf[0] = (char)0xEC;
+  buf[1] = 0x06;
+  buf[2] = (templateAddr >>  0) & 0xFF;
+  buf[3] = (templateAddr >>  8) & 0xFF;
+  buf[4] = (templateAddr >> 16) & 0xFF;
+  buf[5] = (sourceAddr   >>  0) & 0xFF;
+  buf[6] = (sourceAddr   >>  8) & 0xFF;
+  buf[7] = (sourceAddr   >> 16) & 0xFF;
+  outputTrace(buf, 8);
+}
+
+void Tracer::checkSplitSource(uint32_t wramPc, uint32_t romAddr) {
+  uint8_t opcode = SNES::cpu.disassembler_read(wramPc);
+  bool eFlag = SNES::cpu.regs.e;
+  bool mFlag = eFlag || (bool)SNES::cpu.regs.p.m;
+  bool xFlag = eFlag || (bool)SNES::cpu.regs.p.x;
+  unsigned opLen = SNESCPU::getOpcodeLength(mFlag, xFlag, opcode);
+
+  for (unsigned i = 1; i < opLen; i++) {
+    int32_t byteOff = wramOffset(wramPc + i);
+    uint32_t expected = romAddr + i;
+    uint32_t actual = (byteOff >= 0) ? SNES::cpu.wramShadow[byteOff] : SHADOW_SENTINEL;
+    if (actual != expected) {
+        outputPatchRecord(romAddr + i, actual);
+    }
   }
 }
+#endif
 
 void Tracer::stepSmp() {
   if(traceSmp) {
@@ -155,6 +213,7 @@ void Tracer::resetTraceState() {
   tracefile.close();
   traceServer.Shutdown();
 
+  SNES::cpu.resetWramShadow();
   setTraceState(traceCpu || traceSmp || traceSa1 || traceSfx || traceSgb);
 
   // reset trace masks

@@ -8,6 +8,7 @@ public:
   regs_t regs;
   reg24_t aa, rd;
   uint8_t sp, dp;
+  uint32_t pendingWriteSource;
 
   virtual void op_io() = 0;
   virtual uint8_t op_read(uint32_t addr) = 0;

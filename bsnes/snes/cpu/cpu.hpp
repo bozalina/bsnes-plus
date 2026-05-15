@@ -15,6 +15,7 @@ public:
   void enter();
   void power();
   void reset();
+  virtual void resetWramShadow() {}
 
   void serialize(serializer&);
   CPU();

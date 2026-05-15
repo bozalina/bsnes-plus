@@ -56,6 +56,11 @@ private:
   void outputSa1Trace();
   void outputSfxTrace();
   void outputSgbTrace();
+
+#if defined(DEBUGGER)
+  void checkSplitSource(uint32_t wramPc, uint32_t romAddr);
+  void outputPatchRecord(uint32_t templateAddr, uint32_t sourceAddr);
+#endif
 };
 
 extern Tracer *tracer;

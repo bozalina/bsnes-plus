@@ -1,20 +1,59 @@
 #ifndef BUFFERED_SOCKET_H
 #define BUFFERED_SOCKET_H
 
-#include <windows.h>
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
+#include <mutex>
 #include <queue>
+#include <string>
+#include <thread>
 #include <tuple>
 
-const int one_megabayte = 0x400 * 0x400;
+// ---------------------------------------------------------------------------
+// Platform socket abstraction
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+   typedef SOCKET socket_t;
+   static const socket_t INVALID_SOCK_VAL = INVALID_SOCKET;
+#  define SOCK_CLOSE(s)     closesocket(s)
+#  define SOCK_SHUTDOWN(s)  ::shutdown(s, SD_SEND)
+#  define SOCK_LAST_ERROR() WSAGetLastError()
+#  define SOCK_WOULDBLOCK   WSAEWOULDBLOCK
+#  define SOCK_NOBUFS       WSAENOBUFS
+#  define SOCK_CONNRESET    WSAECONNRESET
+#  define SOCK_ERROR_VAL    SOCKET_ERROR
+   static inline void sock_platform_init()    { WSADATA d; WSAStartup(MAKEWORD(2, 2), &d); }
+   static inline void sock_platform_cleanup() { WSACleanup(); }
+#else
+#  include <errno.h>
+#  include <fcntl.h>
+#  include <netdb.h>
+#  include <sys/socket.h>
+#  include <unistd.h>
+   typedef int socket_t;
+   static const socket_t INVALID_SOCK_VAL = -1;
+#  define SOCK_CLOSE(s)     ::close(s)
+#  define SOCK_SHUTDOWN(s)  ::shutdown(s, SHUT_WR)
+#  define SOCK_LAST_ERROR() errno
+#  define SOCK_WOULDBLOCK   EWOULDBLOCK
+#  define SOCK_NOBUFS       ENOBUFS
+#  define SOCK_CONNRESET    ECONNRESET
+#  define SOCK_ERROR_VAL    (-1)
+   static inline void sock_platform_init()    {}
+   static inline void sock_platform_cleanup() {}
+#endif
+// ---------------------------------------------------------------------------
+
+const int one_megabyte = 0x400 * 0x400;
 
 class ByteBuffer {
 public:
     // perf: instead of sending each ~8 byte message immediately, batch them up and send a full batch at once
-    // we're striking a balance between reducing synchronization overhead (so larger = better),
-    // vs having to stay small to not have the following:
-    // 1) the system reject this buffer for socket sending because it's too big [so smaller = better]
-    // 2) if sending on a real network via TCP, packets don't need to be fragment and destroy our performance [so, max size = ~1400 bytes typically]
-    const static int _maxSize = 1 * one_megabayte;
+    const static int _maxSize = 1 * one_megabyte;
 
     uint8_t _buffer[_maxSize];
     int _bufferLenUsed = 0;
@@ -38,16 +77,13 @@ public:
     bool ClientHadConnected() const;
 
 protected:
-    SOCKET _clientSocket = INVALID_SOCKET;
+    socket_t _clientSocket = INVALID_SOCK_VAL;
 
-    bool DoOpen(const char *servname, SOCKET &ListenSocket, addrinfo *&result);
-
+    bool DoOpen(const char *servname, socket_t &listenSocket, struct addrinfo *&result);
     void EnableAsyncIO() const;
-
     void ReportError(const char *errorMsg, bool printLastError = true);
     void Die(const char *errorMsg, bool printLastError = true);
-
-    bool BlockAndWaitForClientConnect(SOCKET listenSocket, bool enableAsyncIO = false);
+    bool BlockAndWaitForClientConnect(socket_t listenSocket, bool enableAsyncIO = false);
 };
 
 class ThreadedSocketServer {
@@ -57,61 +93,51 @@ public:
 
     bool Push(ByteBuffer& byteBuffer);
 
-    // don't call these directly from client code
     void CompressThreadMain();
     void SendThreadMain();
-
-    static ThreadedSocketServer* _threadedSocketServer;
 
     ThreadedSocketServer();
     ~ThreadedSocketServer();
 
 protected:
-    string _servName;
-    const int _maxQueueBytes = (100 * one_megabayte);
+    std::string _servName;
+    static const int _maxQueueLengthAllowed = (100 * one_megabyte) / ByteBuffer::_maxSize;
 
-    volatile HANDLE _compressQueueMutex = INVALID_HANDLE_VALUE;
-    volatile HANDLE _compressQueueItemAdded = INVALID_HANDLE_VALUE;
-    volatile HANDLE _compressQueueOKToAdd = INVALID_HANDLE_VALUE;
-    volatile bool _compressThreadShouldContinue = false;
-    std::queue<ByteBuffer> _readyToCompressQueue; // NOTE: this does a LOT of constant and heavy allocations right now, fix if we care.
+    std::mutex              _compressQueueMutex;
+    std::condition_variable _compressQueueItemAdded;
+    std::condition_variable _compressQueueOKToAdd;
+    std::atomic<bool>       _compressThreadShouldContinue{false};
+    std::queue<ByteBuffer>  _readyToCompressQueue;
 
-    volatile HANDLE _sendQueueMutex = INVALID_HANDLE_VALUE;
-    volatile HANDLE _sendQueueItemAdded = INVALID_HANDLE_VALUE;
-    volatile HANDLE _sendQueueOKToAdd = INVALID_HANDLE_VALUE;
-    volatile bool _sendThreadShouldContinue = false;
-    std::queue<std::tuple<int, const uint8_t*>> _readyToSendQueue;
+    std::mutex                                    _sendQueueMutex;
+    std::condition_variable                       _sendQueueItemAdded;
+    std::condition_variable                       _sendQueueOKToAdd;
+    std::atomic<bool>                             _sendThreadShouldContinue{false};
+    std::queue<std::tuple<int, const uint8_t*>>   _readyToSendQueue;
 
-    const int _maxQueueLengthAllowed = int(_maxQueueBytes / ByteBuffer::_maxSize);
+    std::thread _compressThread;
+    std::thread _sendThread;
 
     SocketServer _socketServer;
-    volatile HANDLE _compressThreadID = INVALID_HANDLE_VALUE;
-    volatile HANDLE _sendThreadID = INVALID_HANDLE_VALUE;
 
     bool PushDecompressedData(const uint8_t *buffer, int len);
-
     bool ProcessNextCompressedItem();
     bool ProcessNextDecompressedItem();
-
     bool WaitForCompressQueueWrite();
     bool WaitForSendQueueWrite();
-
     bool SendBuffer(const uint8_t* packetBuffer, int len);
-
-
 };
 
-// use this for the main thread
+// Use this from the main thread
 class BufferedServer {
 public:
     bool Init(const char* servName);
     void Shutdown();
 
     bool Push(const uint8_t* buf, int len);
-
     bool FlushWorkingBuffer();
 
-    inline bool IsInitialized() {return _initialized;}
+    inline bool IsInitialized() { return _initialized; }
 
 protected:
     ByteBuffer _workingBuffer;

@@ -135,11 +135,30 @@ uint8 CPUDebugger::dma_read(uint32 abus) {
   return data;
 }
 
+uint32_t CPUDebugger::resolveProvenance(uint32_t source) {
+  for (int depth = 0; depth < 8; depth++) {
+    int32_t srcOff = wramOffset(source);
+    if (srcOff < 0) break;
+    uint32_t upstream = wramShadow[srcOff];
+    if (upstream == SHADOW_SENTINEL) break;
+    source = upstream;
+  }
+  return source;
+}
+
 void CPUDebugger::op_write(uint32 addr, uint8 data) {
   debugger.breakpoint_test(Debugger::Breakpoint::Source::CPUBus, Debugger::Breakpoint::Mode::Write, addr, data);
   CPU::op_write(addr, data);
   usage[addr] |= UsageWrite;
   usage[addr] &= ~UsageExec;
+  int32_t woff = wramOffset(addr);
+  if (woff >= 0) {
+    wramShadow[woff] = resolveProvenance(pendingWriteSource);
+  }
+}
+
+void CPUDebugger::resetWramShadow() {
+  memset(wramShadow, 0xFF, WRAM_SIZE * sizeof(uint32_t));
 }
 
 // $2180 MMIO-based WRAM access
@@ -188,12 +207,15 @@ void CPUDebugger::mmio_w2180(uint8 data) {
 CPUDebugger::CPUDebugger() {
   usage = new uint8[1 << 24]();
   cart_usage = new uint8[1 << 24]();
+  wramShadow = new uint32_t[WRAM_SIZE]();
+  memset(wramShadow, 0xFF, WRAM_SIZE * sizeof(uint32_t));
   opcode_pc = 0x8000;
 }
 
 CPUDebugger::~CPUDebugger() {
   delete[] usage;
   delete[] cart_usage;
+  delete[] wramShadow;
 }
 
 bool CPUDebugger::property(unsigned id, string &name, string &value) {

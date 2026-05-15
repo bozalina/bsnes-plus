@@ -30,6 +30,9 @@ uint8 CPU::dma_read(uint32 abus) {
 }
 
 void CPU::dma_transfer(bool direction, uint8 bbus, uint32 abus) {
+  // TODO: wram shadow provenance for DMA transfers (future iteration)
+  // When direction==0 and bbus==0x80 ($2180 WRAM port), track source_bank:source_addr
+  // -> status.wram_addr mapping here.
   if(direction == 0) {
     dma_add_clocks(4);
     regs.mdr = dma_read(abus);

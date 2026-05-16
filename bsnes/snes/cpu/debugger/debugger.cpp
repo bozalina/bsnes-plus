@@ -126,13 +126,24 @@ uint8 CPUDebugger::op_read(uint32 addr) {
 
 uint8 CPUDebugger::dma_read(uint32 abus) {
   usage[abus] |= UsageRead;
-  
+
   int offset = cartridge.rom_offset(abus);
   if (offset >= 0) cart_usage[offset] |= UsageRead;
-  
+
   uint8 data = CPU::dma_read(abus);
   debugger.breakpoint_test(Debugger::Breakpoint::Source::CPUBus, Debugger::Breakpoint::Mode::Read, abus, data);
   return data;
+}
+
+void CPUDebugger::dma_transfer(bool direction, uint8 bbus, uint32 abus) {
+  CPU::dma_transfer(direction, bbus, abus);
+  if (direction == 0 && bbus == 0x80 && dma_transfer_valid(bbus, abus)) {
+    // mmio_w2180 uses post-increment, so wram_addr has already advanced by 1
+    uint32_t wramDest = 0x7e0000 | ((status.wram_addr - 1) & 0x1ffff);
+    int32_t woff = wramOffset(wramDest);
+    if (woff >= 0)
+      wramShadow[woff] = resolveProvenance(abus);
+  }
 }
 
 uint32_t CPUDebugger::resolveProvenance(uint32_t source) {

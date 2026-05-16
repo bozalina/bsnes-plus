@@ -54,7 +54,7 @@ void dma_add_clocks(unsigned clocks);
 bool dma_transfer_valid(uint8 bbus, uint32 abus);
 bool dma_addr_valid(uint32 abus);
 debugvirtual uint8 dma_read(uint32 abus);
-void dma_transfer(bool direction, uint8 bbus, uint32 abus);
+debugvirtual void dma_transfer(bool direction, uint8 bbus, uint32 abus);
 
 uint8 dma_bbus(unsigned i, unsigned channel);
 uint32 dma_addr(unsigned i);

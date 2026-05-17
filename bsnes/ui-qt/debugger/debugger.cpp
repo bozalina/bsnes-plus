@@ -13,6 +13,20 @@
 #include "debugger.moc"
 Debugger *debugger;
 
+// Load a PNG icon, inverting its RGB channels (alpha preserved) when the
+// app is running with a dark palette. Turns the project's black-on-transparent
+// glyphs into white-on-transparent for dark mode; no-op for light mode.
+static QIcon themedIcon(const QString &path) {
+  QPixmap pm(path);
+  bool dark = qApp->palette().color(QPalette::Window).lightness() < 128;
+  if (dark && !pm.isNull()) {
+    QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+    img.invertPixels(QImage::InvertRgb);
+    pm = QPixmap::fromImage(img);
+  }
+  return QIcon(pm);
+}
+
 #include "tracer.cpp"
 
 #include "disassembler/symbols/symbol_map.cpp"
@@ -155,7 +169,7 @@ Debugger::Debugger() {
 
   runBreak = new QToolButton;
   runBreak->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  runBreak->setDefaultAction(new QAction(QIcon(":16x16/dbg-break.png"), "Break", this));
+  runBreak->setDefaultAction(new QAction(themedIcon(":16x16/dbg-break.png"), "Break", this));
   runBreak->setFixedWidth(runBreak->minimumSizeHint().width());
   runBreak->defaultAction()->setToolTip("Pause/resume execution (F5)");
   runBreak->defaultAction()->setShortcut(Qt::Key_F5);
@@ -163,21 +177,21 @@ Debugger::Debugger() {
 
   stepInstruction = new QToolButton;
   stepInstruction->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  stepInstruction->setDefaultAction(new QAction(QIcon(":16x16/dbg-step.png"), "Step", this));
+  stepInstruction->setDefaultAction(new QAction(themedIcon(":16x16/dbg-step.png"), "Step", this));
   stepInstruction->defaultAction()->setToolTip("Step through current instruction (F6)");
   stepInstruction->defaultAction()->setShortcut(Qt::Key_F6);
   toolBar->addWidget(stepInstruction);
 
   stepOver = new QToolButton;
   stepOver->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  stepOver->setDefaultAction(new QAction(QIcon(":16x16/dbg-step-over.png"), "Over", this));
+  stepOver->setDefaultAction(new QAction(themedIcon(":16x16/dbg-step-over.png"), "Over", this));
   stepOver->defaultAction()->setToolTip("Step over current instruction (F7)");
   stepOver->defaultAction()->setShortcut(Qt::Key_F7);
   toolBar->addWidget(stepOver);
 
   stepOut = new QToolButton;
   stepOut->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  stepOut->setDefaultAction(new QAction(QIcon(":16x16/dbg-step-out.png"), "Out", this));
+  stepOut->setDefaultAction(new QAction(themedIcon(":16x16/dbg-step-out.png"), "Out", this));
   stepOut->defaultAction()->setToolTip("Step out of current routine (F8)");
   stepOut->defaultAction()->setShortcut(Qt::Key_F8);
   toolBar->addWidget(stepOut);
@@ -408,7 +422,7 @@ void Debugger::modifySystemState(unsigned state) {
 void Debugger::synchronize() {
   bool active = application.debug && !application.debugrun;
 
-  runBreak->defaultAction()->setIcon(active ? QIcon(":16x16/dbg-run.png") : QIcon(":16x16/dbg-break.png"));
+  runBreak->defaultAction()->setIcon(active ? themedIcon(":16x16/dbg-run.png") : themedIcon(":16x16/dbg-break.png"));
   runBreak->defaultAction()->setText(active ? "Run" : "Break");
 
   unsigned stepChecked = debugCPU->stepProcessor->isChecked() + debugSMP->stepProcessor->isChecked() +

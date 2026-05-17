@@ -77,7 +77,7 @@ TileViewer::TileViewer() {
 
   prevAddressButton = new QToolButton;
   prevAddressButton->setToolTip("Previous");
-  prevAddressButton->setIcon(QIcon(":16x16/mem-prev-unknown.png"));
+  prevAddressButton->setIcon(themedIcon(":16x16/mem-prev-unknown.png"));
   addressLayout->addWidget(prevAddressButton);
 
   address = new QLineEdit;
@@ -87,7 +87,7 @@ TileViewer::TileViewer() {
 
   nextAddressButton = new QToolButton;
   nextAddressButton->setToolTip("Next");
-  nextAddressButton->setIcon(QIcon(":16x16/mem-next-unknown.png"));
+  nextAddressButton->setIcon(themedIcon(":16x16/mem-next-unknown.png"));
   addressLayout->addWidget(nextAddressButton);
 
   sidebarLayout->addRow("Address:", addressLayout);

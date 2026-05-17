@@ -1,4 +1,8 @@
 #include "application.moc"
+#include <QStyleFactory>
+#if defined(PLATFORM_WIN)
+  #include <QSettings>
+#endif
 VideoDisplay display;
 Application application;
 
@@ -130,8 +134,52 @@ void Application::reloadCartridge() {
   }
 }
 
+static bool osPrefersDark() {
+#if defined(PLATFORM_WIN)
+    QSettings s("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                QSettings::NativeFormat);
+    return s.value("AppsUseLightTheme", 1).toInt() == 0;
+#elif defined(PLATFORM_X)
+    // Ask xdg-desktop-portal first. 1 = prefer dark, 2 = prefer light, 0 = no preference.
+    unsigned scheme = xdgPortalColorScheme();
+    if (scheme == 1) return true;
+    if (scheme == 2) return false;
+    // No preference reported (or portal unavailable): fall back to the Qt palette,
+    // which on KDE / qgnomeplatform setups reflects the DE theme.
+    return QGuiApplication::palette().color(QPalette::Window).lightness() < 128;
+#else
+    // macOS (Qt 5.12+) reflects NSAppearance in the default palette.
+    return QGuiApplication::palette().color(QPalette::Window).lightness() < 128;
+#endif
+}
+
+static QPalette buildDarkPalette() {
+    QPalette p;
+    p.setColor(QPalette::Window,          QColor(0x35, 0x35, 0x35));
+    p.setColor(QPalette::WindowText,      Qt::white);
+    p.setColor(QPalette::Base,            QColor(0x23, 0x23, 0x23));
+    p.setColor(QPalette::AlternateBase,   QColor(0x35, 0x35, 0x35));
+    p.setColor(QPalette::ToolTipBase,     QColor(0x19, 0x19, 0x19));
+    p.setColor(QPalette::ToolTipText,     Qt::white);
+    p.setColor(QPalette::Text,            Qt::white);
+    p.setColor(QPalette::Button,          QColor(0x35, 0x35, 0x35));
+    p.setColor(QPalette::ButtonText,      Qt::white);
+    p.setColor(QPalette::BrightText,      Qt::red);
+    p.setColor(QPalette::Link,            QColor(0x2A, 0x82, 0xDA));
+    p.setColor(QPalette::Highlight,       QColor(0x2A, 0x82, 0xDA));
+    p.setColor(QPalette::HighlightedText, Qt::black);
+    p.setColor(QPalette::Disabled, QPalette::Text,       QColor(0x7F, 0x7F, 0x7F));
+    p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x7F, 0x7F, 0x7F));
+    p.setColor(QPalette::Disabled, QPalette::WindowText, QColor(0x7F, 0x7F, 0x7F));
+    return p;
+}
+
 int Application::main(int &argc, char **argv) {
   app = new App(argc, argv);
+  app->setStyle(QStyleFactory::create("Fusion"));
+  if (osPrefersDark()) {
+      app->setPalette(buildDarkPalette());
+  }
   #if !defined(PLATFORM_WIN)
     #if defined(PLATFORM_OSX)
     app->setWindowIcon(QIcon(":/bsnes_512.png"));

@@ -663,12 +663,20 @@ void DisassemblerView::paintOpcode(QPainter &painter, RenderableDisassemblerLine
       painter.fillRect(QRect(0, y - charHeight + lineOffset, viewport()->width(), charHeight), _addressAreaColor);
     }
 
+    bool dark = viewport()->palette().color(QPalette::Base).lightness() < 128;
     addressColor = Qt::gray;
     textColor = viewport()->palette().color(QPalette::WindowText);
-    opColor = QColor(0x00, 0x00, 0x88, 0xff);
-    paramImmediateColor = QColor(0x00, 0x88, 0x00, 0xff);
-    paramAddressColor = QColor(0x88, 0x00, 0x00, 0xff);
-    paramSymbolColor = QColor(0xFF, 0x00, 0x00, 0xff);
+    if (dark) {
+        opColor             = QColor(0x6C, 0x9E, 0xFF);  // light blue
+        paramImmediateColor = QColor(0x9C, 0xDC, 0x98);  // light green
+        paramAddressColor   = QColor(0xE0, 0x9B, 0x6B);  // light orange
+        paramSymbolColor    = QColor(0xE6, 0x6A, 0x8A);  // light pink
+    } else {
+        opColor             = QColor(0x00, 0x00, 0x88, 0xff);
+        paramImmediateColor = QColor(0x00, 0x88, 0x00, 0xff);
+        paramAddressColor   = QColor(0x88, 0x00, 0x00, 0xff);
+        paramSymbolColor    = QColor(0xFF, 0x00, 0x00, 0xff);
+    }
   }
 
   if (breakpointEditor->indexOfBreakpointExec(line.line.address, processor->getBreakpointBusName()) >= 0) {
@@ -725,8 +733,9 @@ void DisassemblerView::paintOpcode(QPainter &painter, RenderableDisassemblerLine
     path.lineTo(ar, t + hw);
     path.lineTo(al, t + w + ap);
 
-    painter.setPen(Qt::black);
-    painter.setBrush(Qt::black);
+    QColor arrowColor = viewport()->palette().color(QPalette::WindowText);
+    painter.setPen(arrowColor);
+    painter.setBrush(arrowColor);
     painter.drawEllipse(QPoint(l + hw, b - hw), hw, hw);
     painter.drawEllipse(QPoint(l + hw, t + hw), hw, hw);
     painter.drawRect(l, t + hw, w, b - t - w);
@@ -870,7 +879,7 @@ void DisassemblerView::paintHeader(QPainter &painter) {
     painter.drawLine(columnPositions[i], 0, columnPositions[i], headerHeight);
   }
 
-  painter.setPen(Qt::black);
+  painter.setPen(palette().color(QPalette::WindowText));
   SET_CLIPPING(1);
   painter.drawText(columnPositions[1] + charPadding, headerHeight - charPadding, "Disassembly");
   SET_CLIPPING(2);

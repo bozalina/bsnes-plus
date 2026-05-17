@@ -18,7 +18,11 @@ QHexEdit::QHexEdit(QWidget *parent) : QAbstractScrollArea(parent)
     setFont(QFont(Style::Monospace));
     
     setAddressAreaColor(this->palette().alternateBase().color());
-    setHighlightingColor(QColor(0xff, 0xff, 0x99, 0xff));
+    {
+        bool dark = palette().color(QPalette::Base).lightness() < 128;
+        setHighlightingColor(dark ? QColor(0x50, 0x48, 0x18)    // dim amber
+                                  : QColor(0xFF, 0xFF, 0x99)); // pale yellow
+    }
     setSelectionColor(this->palette().highlight().color());
 
     _cursorTimer.setInterval(500);
@@ -203,7 +207,7 @@ QColor QHexEdit::highlightingColor()
 void QHexEdit::setSelectionColor(const QColor &color)
 {
     _brushSelection = QBrush(color);
-    _penSelection = QPen(Qt::white);
+    _penSelection = QPen(palette().color(QPalette::HighlightedText));
     viewport()->update();
 }
 
@@ -722,10 +726,11 @@ void QHexEdit::paintEvent(QPaintEvent *event)
         // paint hex and ascii area
         QPen colStandard = QPen(viewport()->palette().color(QPalette::WindowText));
         // TODO: make these configurable
-        QPen colUsageRead   = QPen(QColor(0, 0, 224));
-        QPen colUsageWrite  = QPen(QColor(0, 0, 224));
-        QPen colUsageExec   = QPen(QColor(224, 0, 0));
-        QPen colUsageRWExec = QPen(QColor(224, 0, 224));
+        bool darkBg = viewport()->palette().color(QPalette::Base).lightness() < 128;
+        QPen colUsageRead   = QPen(darkBg ? QColor(0x6C, 0x9E, 0xFF) : QColor(0x00, 0x00, 0xE0));
+        QPen colUsageWrite  = QPen(darkBg ? QColor(0x6C, 0x9E, 0xFF) : QColor(0x00, 0x00, 0xE0));
+        QPen colUsageExec   = QPen(darkBg ? QColor(0xE0, 0x9B, 0x6B) : QColor(0xE0, 0x00, 0x00));
+        QPen colUsageRWExec = QPen(darkBg ? QColor(0xE6, 0x9B, 0xE6) : QColor(0xE0, 0x00, 0xE0));
 
         painter.setBackgroundMode(Qt::TransparentMode);
 

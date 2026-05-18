@@ -106,21 +106,12 @@ void Tracer::stepCpu() {
 
   uint32_t pc = SNES::cpu.regs.pc;
 
-  // The same ROM byte can legitimately be both an opcode and an operand depending
-  // on the M/X flag state at execution time (because some 65C816 instructions like
-  // LDA #imm have flag-dependent length). Key the dedupe bitmap by (M,X) so each
-  // unique interpretation gets emitted exactly once per session instead of thousands
-  // of times for code that toggles M/X.
-  bool effM = SNES::cpu.regs.e || (bool)SNES::cpu.regs.p.m;
-  bool effX = SNES::cpu.regs.e || (bool)SNES::cpu.regs.p.x;
-  uint8_t* mask = traceMaskCPU[(effM ? 2 : 0) | (effX ? 1 : 0)];
-
 #if defined(DEBUGGER)
   int32_t woff = wramOffset(pc);
   if (woff >= 0) {
     uint32_t romAddr = SNES::cpu.wramShadow[woff];
     if (romAddr != SHADOW_SENTINEL && wramOffset(romAddr) < 0) {
-      if (!traceMask || !(mask[romAddr >> 3] & (0x80 >> (romAddr & 7)))) {
+      if (!traceMask || !(traceMaskCPU[romAddr >> 3] & (0x80 >> (romAddr & 7)))) {
         char buf[256]; int len;
         if (traceOutputFormatIsText) {
           SNES::cpu.disassemble_opcode(buf, romAddr, config().debugger.showHClocks);
@@ -130,7 +121,7 @@ void Tracer::stepCpu() {
         }
         outputTrace(buf, len);
       }
-      mask[romAddr >> 3] |= 0x80 >> (romAddr & 7);
+      traceMaskCPU[romAddr >> 3] |= 0x80 >> (romAddr & 7);
       return;
     }
     // WRAM PC with no ROM provenance — skip (data region, not copied code)
@@ -138,10 +129,10 @@ void Tracer::stepCpu() {
   }
 #endif
 
-  if (!traceMask || !(mask[pc >> 3] & (0x80 >> (pc & 7)))) {
+  if (!traceMask || !(traceMaskCPU[pc >> 3] & (0x80 >> (pc & 7)))) {
     outputCpuTrace();
   }
-  mask[pc >> 3] |= 0x80 >> (pc & 7);
+  traceMaskCPU[pc >> 3] |= 0x80 >> (pc & 7);
 }
 
 void Tracer::stepSmp() {
@@ -256,7 +247,7 @@ void Tracer::setTraceMaskState(bool state) {
   traceMask = state;
   if(traceMask) {
     //flush all bitmasks once enabled
-    for (int i = 0; i < 4; i++) memset(traceMaskCPU[i], 0x00, (1 << 24) >> 3);
+    memset(traceMaskCPU, 0x00, (1 << 24) >> 3);
     memset(traceMaskSMP, 0x00, (1 << 16) >> 3);
     memset(traceMaskSA1, 0x00, (1 << 24) >> 3);
     memset(traceMaskSFX, 0x00, (1 << 23) >> 3);
@@ -272,7 +263,7 @@ Tracer::Tracer() {
   traceSgb = false;
   traceMask = false;
 
-  for (int i = 0; i < 4; i++) traceMaskCPU[i] = new uint8_t[(1 << 24) >> 3]();
+  traceMaskCPU = new uint8_t[(1 << 24) >> 3]();
   traceMaskSMP = new uint8_t[(1 << 16) >> 3]();
   traceMaskSA1 = new uint8_t[(1 << 24) >> 3]();
   traceMaskSFX = new uint8_t[(1 << 23) >> 3]();
@@ -286,7 +277,7 @@ Tracer::Tracer() {
 }
 
 Tracer::~Tracer() {
-  for (int i = 0; i < 4; i++) delete[] traceMaskCPU[i];
+  delete[] traceMaskCPU;
   delete[] traceMaskSMP;
   delete[] traceMaskSA1;
   delete[] traceMaskSFX;

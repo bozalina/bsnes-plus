@@ -38,10 +38,7 @@ private:
   bool traceSgb;
   bool traceMask;
 
-  // CPU trace dedupe is keyed by (address, effective M flag, effective X flag).
-  // Same byte can produce different valid disassemblies under 8-vs-16-bit M/X,
-  // so we keep one bitmap per (M,X) combo (index = M*2 + X).
-  uint8_t *traceMaskCPU[4];
+  uint8_t *traceMaskCPU;
   uint8_t *traceMaskSMP;
   uint8_t *traceMaskSA1;
   uint8_t *traceMaskSFX;

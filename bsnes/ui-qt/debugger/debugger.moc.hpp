@@ -61,6 +61,7 @@ public slots:
   void clear();
   void synchronize();
   void frameTick();
+  void saveUsageToDisk();
 
   void toggleRunStatus();
   void stepAction();
@@ -79,6 +80,7 @@ private:
   inline void switchWindow();
 
   unsigned frameCounter;
+  QTimer *usageTimer;
   string defaultSymbolsCPU;
   string defaultSymbolsCPUWithSA1;
   string defaultSymbolsCPUWithSFX;

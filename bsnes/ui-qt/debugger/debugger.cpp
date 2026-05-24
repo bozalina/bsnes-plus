@@ -275,6 +275,10 @@ Debugger::Debugger() {
   QTimer *updateTimer = new QTimer(this);
   connect(updateTimer, SIGNAL(timeout()), this, SLOT(frameTick()));
   updateTimer->start(15);
+
+  usageTimer = new QTimer(this);
+  connect(usageTimer, SIGNAL(timeout()), this, SLOT(saveUsageToDisk()));
+  usageTimer->start(60000);
 }
 
 void Debugger::createMemoryEditor() {
@@ -378,17 +382,7 @@ void Debugger::modifySystemState(unsigned state) {
   }
 
   if(state == Utility::UnloadCartridge) {
-    if(config().debugger.cacheUsageToDisk && fp.open(usagefile, file::mode::write)) {
-      fp.write(SNES::cpu.usage, 1 << 24);
-      fp.write(SNES::smp.usage, 1 << 16);
-      if (SNES::cartridge.has_sa1())
-        fp.write(SNES::sa1.usage, 1 << 24);
-      if (SNES::cartridge.has_superfx())
-        fp.write(SNES::superfx.usage, 1 << 23);
-      if (SNES::cartridge.mode() == SNES::Cartridge::Mode::SuperGameBoy)
-        fp.write(SNES::supergameboy.usage_, 1 << 24);
-      fp.close();
-    }
+    saveUsageToDisk();
     
     if(config().debugger.saveSymbols) {
       symbolsCPU->saveToFile(nall::basename(symfile), ".cpu.sym");
@@ -718,6 +712,27 @@ void Debugger::event() {
   if(!SNES::debugger.log_without_break) {
     show();
     activateWindow();
+  }
+}
+
+void Debugger::saveUsageToDisk() {
+  if(!SNES::cartridge.loaded()) return;
+  if(!config().debugger.cacheUsageToDisk) return;
+
+  string usagefile = filepath(nall::basename(cartridge.fileName), config().path.data);
+  usagefile << "-usage.bin";
+
+  file fp;
+  if(fp.open(usagefile, file::mode::write)) {
+    fp.write(SNES::cpu.usage, 1 << 24);
+    fp.write(SNES::smp.usage, 1 << 16);
+    if(SNES::cartridge.has_sa1())
+      fp.write(SNES::sa1.usage, 1 << 24);
+    if(SNES::cartridge.has_superfx())
+      fp.write(SNES::superfx.usage, 1 << 23);
+    if(SNES::cartridge.mode() == SNES::Cartridge::Mode::SuperGameBoy)
+      fp.write(SNES::supergameboy.usage_, 1 << 24);
+    fp.close();
   }
 }
 

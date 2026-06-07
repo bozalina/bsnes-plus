@@ -43,7 +43,6 @@ private:
     void setupRoutes();
 
     // ── State helpers (must be called from Qt main thread) ───────────────
-    json getStatusJson();
     json getCpuStateJson();
     json buildBreakResult();
     json disassembleAt(uint32_t addr, int lines);

@@ -110,6 +110,7 @@ json BsnesApiServer::doStep(SNES::Debugger::StepType type,
     bool fired = _breakCv.wait_for(lock, timeout,
                                     [this] { return _breakOccurred; });
     if (!fired) {
+        lock.unlock();   // release before blocking dispatch to avoid deadlock
         // Timeout — force a break so the emulator doesn't run forever.
         dispatch([]() {
             application.debug    = true;
@@ -649,6 +650,9 @@ void BsnesApiServer::setupRoutes() {
                 sendError(res, 400, "INVALID_DATA", "data elements must be integers."); return;
             }
             data.push_back((uint8_t)elem.get<int>());
+        }
+        if (data.size() > 4096) {
+            sendError(res, 400, "TOO_LARGE", "data array exceeds 4096-byte limit."); return;
         }
         dispatch([this, srcName, addr, data]() {
             writeMemory(srcName, addr, data);

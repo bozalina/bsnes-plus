@@ -225,3 +225,138 @@ json BsnesApiServer::disassembleAt(uint32_t addr, int lines) {
     }
     return result;
 }
+
+// ── parseSource ───────────────────────────────────────────────────────────────
+
+bool BsnesApiServer::parseSource(const std::string& name,
+                                  SNES::Debugger::MemorySource& out) {
+    using MS = SNES::Debugger::MemorySource;
+    if      (name == "cpu")     { out = MS::CPUBus;  return true; }
+    else if (name == "apu")     { out = MS::APUBus;  return true; }
+    else if (name == "apuram")  { out = MS::APURAM;  return true; }
+    else if (name == "dsp")     { out = MS::DSP;     return true; }
+    else if (name == "vram")    { out = MS::VRAM;    return true; }
+    else if (name == "oam")     { out = MS::OAM;     return true; }
+    else if (name == "cgram")   { out = MS::CGRAM;   return true; }
+    else if (name == "cartrom") { out = MS::CartROM; return true; }
+    else if (name == "cartram") { out = MS::CartRAM; return true; }
+    return false;
+}
+
+// ── readMemory ────────────────────────────────────────────────────────────────
+// Must be called from the Qt main thread.
+
+json BsnesApiServer::readMemory(const std::string& source,
+                                 uint32_t addr, int count) {
+    SNES::Debugger::MemorySource src;
+    parseSource(source, src);
+
+    count = std::min(count, 4096);
+    json data = json::array();
+    for (int i = 0; i < count; ++i) {
+        data.push_back((int)SNES::debugger.read(src, addr + i));
+    }
+    return {
+        {"source", source},
+        {"addr",   hexStr(addr, 6)},
+        {"count",  count},
+        {"data",   data},
+    };
+}
+
+// ── writeMemory ───────────────────────────────────────────────────────────────
+// Must be called from the Qt main thread.
+
+void BsnesApiServer::writeMemory(const std::string& source,
+                                  uint32_t addr,
+                                  const std::vector<uint8_t>& data) {
+    SNES::Debugger::MemorySource src;
+    parseSource(source, src);
+    for (size_t i = 0; i < data.size(); ++i) {
+        SNES::debugger.write(src, addr + i, data[i]);
+    }
+}
+
+// ── sendJson / sendError ──────────────────────────────────────────────────────
+
+void BsnesApiServer::sendJson(httplib::Response& res,
+                               const json& j, int status) {
+    res.status = status;
+    res.set_content(j.dump(), "application/json");
+}
+
+void BsnesApiServer::sendError(httplib::Response& res, int status,
+                                const std::string& code,
+                                const std::string& message) {
+    sendJson(res, {{"error", code}, {"message", message}}, status);
+}
+
+// ── requirePaused / requireLoaded ─────────────────────────────────────────────
+
+bool BsnesApiServer::requireLoaded(httplib::Response& res) {
+    if (!SNES::cartridge.loaded()) {
+        sendError(res, 503, "NO_CARTRIDGE", "No cartridge is loaded.");
+        return false;
+    }
+    return true;
+}
+
+bool BsnesApiServer::requirePaused(httplib::Response& res) {
+    if (!requireLoaded(res)) return false;
+    if (!application.debug || application.debugrun) {
+        sendError(res, 409, "NOT_PAUSED",
+                  "Emulator is not paused. POST /break first.");
+        return false;
+    }
+    return true;
+}
+
+// ── breakpointToJson ──────────────────────────────────────────────────────────
+
+json BsnesApiServer::breakpointToJson(int index,
+                                       const SNES::Debugger::Breakpoint& bp) {
+    using Mode   = SNES::Debugger::Breakpoint::Mode;
+    using Source = SNES::Debugger::Breakpoint::Source;
+
+    json modeArr = json::array();
+    if (bp.mode & (unsigned)Mode::Exec)  modeArr.push_back("Exec");
+    if (bp.mode & (unsigned)Mode::Read)  modeArr.push_back("Read");
+    if (bp.mode & (unsigned)Mode::Write) modeArr.push_back("Write");
+
+    std::string srcStr;
+    switch (bp.source) {
+        case Source::CPUBus:  srcStr = "CPUBus";  break;
+        case Source::APURAM:  srcStr = "APURAM";  break;
+        case Source::DSP:     srcStr = "DSP";     break;
+        case Source::VRAM:    srcStr = "VRAM";    break;
+        case Source::OAM:     srcStr = "OAM";     break;
+        case Source::CGRAM:   srcStr = "CGRAM";   break;
+        case Source::SA1Bus:  srcStr = "SA1Bus";  break;
+        case Source::SFXBus:  srcStr = "SFXBus";  break;
+        case Source::SGBBus:  srcStr = "SGBBus";  break;
+        default:              srcStr = "Unknown";  break;
+    }
+
+    std::string cmpStr;
+    switch (bp.compare) {
+        case SNES::Debugger::Breakpoint::Compare::Equal:        cmpStr = "Equal";        break;
+        case SNES::Debugger::Breakpoint::Compare::NotEqual:     cmpStr = "NotEqual";     break;
+        case SNES::Debugger::Breakpoint::Compare::Less:         cmpStr = "Less";         break;
+        case SNES::Debugger::Breakpoint::Compare::LessEqual:    cmpStr = "LessEqual";    break;
+        case SNES::Debugger::Breakpoint::Compare::Greater:      cmpStr = "Greater";      break;
+        case SNES::Debugger::Breakpoint::Compare::GreaterEqual: cmpStr = "GreaterEqual"; break;
+    }
+
+    json j = {
+        {"index",   index},
+        {"addr",    hexStr(bp.addr, 6)},
+        {"mode",    modeArr},
+        {"source",  srcStr},
+        {"compare", cmpStr},
+        {"data",    bp.data},
+        {"counter", bp.counter},
+    };
+    if (bp.addr_end > 0)
+        j["addrEnd"] = hexStr(bp.addr_end, 6);
+    return j;
+}

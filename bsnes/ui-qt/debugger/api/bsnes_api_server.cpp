@@ -655,3 +655,126 @@ void BsnesApiServer::setupRoutes() {
         }, true);
         sendJson(res, {{"written", (int)data.size()}, {"addr", hexStr(addr, 6)}});
     });
+
+    // ── GET /breakpoints ─────────────────────────────────────────────────────
+    _svr->Get("/breakpoints", [this](const httplib::Request&, httplib::Response& res) {
+        json result;
+        dispatch([this, &result]() {
+            result = json::array();
+            for (unsigned i = 0; i < SNES::debugger.breakpoint.size(); ++i) {
+                result.push_back(breakpointToJson(i, SNES::debugger.breakpoint[i]));
+            }
+        }, true);
+        sendJson(res, result);
+    });
+
+    // ── POST /breakpoints ────────────────────────────────────────────────────
+    // Required body fields: mode (array of "Exec"/"Read"/"Write"), source (string)
+    // Optional: addr (hex string, default "000000"), addrEnd (hex string),
+    //           data (int -1..255, default -1), compare (string, default "Equal")
+    _svr->Post("/breakpoints", [this](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_JSON", "Body is not valid JSON."); return; }
+
+        if (!body.contains("mode") || !body["mode"].is_array() || body["mode"].empty()) {
+            sendError(res, 400, "MISSING_FIELD", "'mode' array is required."); return;
+        }
+        if (!body.contains("source") || !body["source"].is_string()) {
+            sendError(res, 400, "MISSING_FIELD", "'source' string is required."); return;
+        }
+
+        SNES::Debugger::Breakpoint bp;
+
+        // source
+        using BPSource = SNES::Debugger::Breakpoint::Source;
+        std::string srcStr = body["source"].get<std::string>();
+        if      (srcStr == "CPUBus")  bp.source = BPSource::CPUBus;
+        else if (srcStr == "APURAM")  bp.source = BPSource::APURAM;
+        else if (srcStr == "DSP")     bp.source = BPSource::DSP;
+        else if (srcStr == "VRAM")    bp.source = BPSource::VRAM;
+        else if (srcStr == "OAM")     bp.source = BPSource::OAM;
+        else if (srcStr == "CGRAM")   bp.source = BPSource::CGRAM;
+        else if (srcStr == "SA1Bus")  bp.source = BPSource::SA1Bus;
+        else if (srcStr == "SFXBus")  bp.source = BPSource::SFXBus;
+        else if (srcStr == "SGBBus")  bp.source = BPSource::SGBBus;
+        else { sendError(res, 400, "INVALID_SOURCE", "Unknown source: " + srcStr); return; }
+
+        // mode flags
+        using BPMode = SNES::Debugger::Breakpoint::Mode;
+        bp.mode = 0;
+        for (auto& m : body["mode"]) {
+            if (!m.is_string()) { sendError(res, 400, "INVALID_MODE", "mode elements must be strings."); return; }
+            std::string ms = m.get<std::string>();
+            if      (ms == "Exec")  bp.mode |= (unsigned)BPMode::Exec;
+            else if (ms == "Read")  bp.mode |= (unsigned)BPMode::Read;
+            else if (ms == "Write") bp.mode |= (unsigned)BPMode::Write;
+            else { sendError(res, 400, "INVALID_MODE", "Unknown mode: " + ms); return; }
+        }
+        if (bp.mode == 0) { sendError(res, 400, "INVALID_MODE", "At least one mode is required."); return; }
+
+        // addr (optional, default 0)
+        if (body.contains("addr") && body["addr"].is_string()) {
+            try { bp.addr = (unsigned)std::stoul(body["addr"].get<std::string>(), nullptr, 16); }
+            catch (...) { sendError(res, 400, "INVALID_PARAM", "Cannot parse addr."); return; }
+        }
+
+        // addrEnd (optional)
+        if (body.contains("addrEnd") && body["addrEnd"].is_string()) {
+            try { bp.addr_end = (unsigned)std::stoul(body["addrEnd"].get<std::string>(), nullptr, 16); }
+            catch (...) { sendError(res, 400, "INVALID_PARAM", "Cannot parse addrEnd."); return; }
+        }
+
+        // data (optional, default -1)
+        if (body.contains("data") && body["data"].is_number_integer())
+            bp.data = body["data"].get<int>();
+
+        // compare (optional, default Equal)
+        if (body.contains("compare") && body["compare"].is_string()) {
+            using Cmp = SNES::Debugger::Breakpoint::Compare;
+            std::string cmpStr = body["compare"].get<std::string>();
+            if      (cmpStr == "Equal")        bp.compare = Cmp::Equal;
+            else if (cmpStr == "NotEqual")     bp.compare = Cmp::NotEqual;
+            else if (cmpStr == "Less")         bp.compare = Cmp::Less;
+            else if (cmpStr == "LessEqual")    bp.compare = Cmp::LessEqual;
+            else if (cmpStr == "Greater")      bp.compare = Cmp::Greater;
+            else if (cmpStr == "GreaterEqual") bp.compare = Cmp::GreaterEqual;
+            else { sendError(res, 400, "INVALID_COMPARE", "Unknown compare: " + cmpStr); return; }
+        }
+
+        json result;
+        dispatch([this, bp, &result]() mutable {
+            SNES::debugger.breakpoint.append(bp);
+            int idx = (int)SNES::debugger.breakpoint.size() - 1;
+            result = breakpointToJson(idx, SNES::debugger.breakpoint[idx]);
+        }, true);
+        sendJson(res, result, 201);
+    });
+
+    // ── DELETE /breakpoints/:index ───────────────────────────────────────────
+    _svr->Delete("/breakpoints/:index", [this](const httplib::Request& req, httplib::Response& res) {
+        int idx;
+        try { idx = std::stoi(req.path_params.at("index")); }
+        catch (...) { sendError(res, 400, "INVALID_PARAM", "index must be an integer."); return; }
+
+        json result;
+        bool found = false;
+        dispatch([this, idx, &result, &found]() {
+            if (idx < 0 || (unsigned)idx >= SNES::debugger.breakpoint.size()) return;
+            found = true;
+            result = breakpointToJson(idx, SNES::debugger.breakpoint[idx]);
+            SNES::debugger.breakpoint.remove(idx);
+        }, true);
+        if (!found) { sendError(res, 404, "NOT_FOUND", "No breakpoint at index."); return; }
+        sendJson(res, {{"deleted", result}});
+    });
+
+    // ── DELETE /breakpoints ──────────────────────────────────────────────────
+    _svr->Delete("/breakpoints", [this](const httplib::Request&, httplib::Response& res) {
+        int cleared = 0;
+        dispatch([this, &cleared]() {
+            cleared = (int)SNES::debugger.breakpoint.size();
+            SNES::debugger.breakpoint.reset();
+        }, true);
+        sendJson(res, {{"cleared", cleared}});
+    });

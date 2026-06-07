@@ -778,3 +778,57 @@ void BsnesApiServer::setupRoutes() {
         }, true);
         sendJson(res, {{"cleared", cleared}});
     });
+
+    // ── GET /openapi.json ────────────────────────────────────────────────────
+    _svr->Get("/openapi.json", [this](const httplib::Request&, httplib::Response& res) {
+        static const std::string openapi = R"({
+  "openapi": "3.0.3",
+  "info": { "title": "bsnes-plus Debug API", "version": "1.0.0" },
+  "servers": [{ "url": "http://127.0.0.1:5744" }],
+  "paths": {
+    "/status":           { "get":    { "summary": "Emulator status",            "operationId": "getStatus"        } },
+    "/break":            { "post":   { "summary": "Break execution",            "operationId": "postBreak"        } },
+    "/resume":           { "post":   { "summary": "Resume to next break",       "operationId": "postResume"       } },
+    "/run":              { "post":   { "summary": "Run at full speed",          "operationId": "postRun"          } },
+    "/step/into":        { "post":   { "summary": "Step into one instruction",  "operationId": "stepInto"         } },
+    "/step/over":        { "post":   { "summary": "Step over one instruction",  "operationId": "stepOver"         } },
+    "/step/out":         { "post":   { "summary": "Step out of subroutine",     "operationId": "stepOut"          } },
+    "/step/vblank":      { "post":   { "summary": "Run to next VBlank",         "operationId": "stepVBlank"       } },
+    "/step/hblank":      { "post":   { "summary": "Run to next HBlank",         "operationId": "stepHBlank"       } },
+    "/step/nmi":         { "post":   { "summary": "Run to next NMI",            "operationId": "stepNMI"          } },
+    "/step/irq":         { "post":   { "summary": "Run to next IRQ",            "operationId": "stepIRQ"          } },
+    "/cpu/registers":    { "get":    { "summary": "Read CPU registers",         "operationId": "getRegisters"     },
+                           "put":    { "summary": "Write CPU registers",        "operationId": "putRegisters"     } },
+    "/cpu/disassemble":  { "get":    { "summary": "Disassemble at address",     "operationId": "disassemble"      } },
+    "/cpu/usage":        { "get":    { "summary": "CPU usage map at address",   "operationId": "getUsage"         } },
+    "/memory/{source}":  { "get":    { "summary": "Read memory",                "operationId": "readMemory"       },
+                           "put":    { "summary": "Write memory",               "operationId": "writeMemory"      } },
+    "/breakpoints":      { "get":    { "summary": "List breakpoints",           "operationId": "listBreakpoints"  },
+                           "post":   { "summary": "Add breakpoint",             "operationId": "addBreakpoint"    },
+                           "delete": { "summary": "Clear all breakpoints",      "operationId": "clearBreakpoints" } },
+    "/breakpoints/{index}": { "delete": { "summary": "Remove breakpoint",       "operationId": "deleteBreakpoint" } }
+  }
+})";
+        res.status = 200;
+        res.set_content(openapi, "application/json");
+    });
+
+    // ── GET /scalar ──────────────────────────────────────────────────────────
+    _svr->Get("/scalar", [](const httplib::Request&, httplib::Response& res) {
+        static const std::string html = R"(<!DOCTYPE html>
+<html>
+<head>
+  <title>bsnes-plus Debug API</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+  <script id="api-reference" data-url="/openapi.json"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>)";
+        res.status = 200;
+        res.set_content(html, "text/html");
+    });
+
+} // end setupRoutes()

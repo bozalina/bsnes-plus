@@ -360,3 +360,63 @@ json BsnesApiServer::breakpointToJson(int index,
         j["addrEnd"] = hexStr(bp.addr_end, 6);
     return j;
 }
+
+// ── setupRoutes ───────────────────────────────────────────────────────────────
+
+void BsnesApiServer::setupRoutes() {
+    // ── GET /status ──────────────────────────────────────────────────────────
+    // Does NOT require paused. Safe to call at any time.
+    _svr->Get("/status", [this](const httplib::Request&, httplib::Response& res) {
+        json result;
+        dispatch([this, &result]() {
+            bool paused = application.debug && !application.debugrun;
+            std::string evtStr;
+            switch (SNES::debugger.break_event) {
+                case SNES::Debugger::BreakEvent::BreakpointHit: evtStr = "BreakpointHit"; break;
+                case SNES::Debugger::BreakEvent::CPUStep:       evtStr = "CPUStep";       break;
+                case SNES::Debugger::BreakEvent::SMPStep:       evtStr = "SMPStep";       break;
+                case SNES::Debugger::BreakEvent::SA1Step:       evtStr = "SA1Step";       break;
+                case SNES::Debugger::BreakEvent::SFXStep:       evtStr = "SFXStep";       break;
+                case SNES::Debugger::BreakEvent::SGBStep:       evtStr = "SGBStep";       break;
+                default:                                         evtStr = "None";          break;
+            }
+            result = {
+                {"paused",     paused},
+                {"loaded",     (bool)SNES::cartridge.loaded()},
+                {"breakEvent", evtStr},
+                {"cpu",        paused ? getCpuStateJson() : json(nullptr)},
+            };
+        }, /*blocking=*/true);
+        sendJson(res, result);
+    });
+
+    // ── POST /break ──────────────────────────────────────────────────────────
+    _svr->Post("/break", [this](const httplib::Request&, httplib::Response& res) {
+        json result;
+        dispatch([this, &result]() {
+            application.debug    = true;
+            application.debugrun = false;
+            result = buildBreakResult();
+        }, /*blocking=*/true);
+        sendJson(res, result);
+    });
+
+    // ── POST /resume ─────────────────────────────────────────────────────────
+    // Non-blocking: the emulator is released to run; we don't wait for a break.
+    _svr->Post("/resume", [this](const httplib::Request&, httplib::Response& res) {
+        dispatch([]() {
+            application.debug    = true;
+            application.debugrun = true;
+        }, /*blocking=*/false);
+        sendJson(res, {{"accepted", true}});
+    });
+
+    // ── POST /run ────────────────────────────────────────────────────────────
+    // Exits debug mode entirely — emulator runs at full speed.
+    _svr->Post("/run", [this](const httplib::Request&, httplib::Response& res) {
+        dispatch([]() {
+            application.debug    = false;
+            application.debugrun = false;
+        }, /*blocking=*/false);
+        sendJson(res, {{"accepted", true}});
+    });

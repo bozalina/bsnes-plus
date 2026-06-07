@@ -474,3 +474,120 @@ void BsnesApiServer::setupRoutes() {
         int status = result.contains("code") ? 408 : 200;
         sendJson(res, result, status);
     });
+
+    // ── GET /cpu/registers ───────────────────────────────────────────────────
+    _svr->Get("/cpu/registers", [this](const httplib::Request&, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        json result;
+        dispatch([this, &result]() {
+            result = getCpuStateJson();
+        }, true);
+        sendJson(res, result);
+    });
+
+    // ── PUT /cpu/registers ───────────────────────────────────────────────────
+    _svr->Put("/cpu/registers", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_JSON", "Body is not valid JSON."); return; }
+
+        json result;
+        dispatch([this, &body, &result]() {
+            using R = CPUDebugger::Register;
+            using F = CPUDebugger;
+            auto& cpu = SNES::cpu;
+
+            // Parse hex-string register values
+            auto setReg = [&](const std::string& key, R reg) {
+                if (body.contains(key) && body[key].is_string()) {
+                    unsigned val = (unsigned)std::stoul(body[key].get<std::string>(), nullptr, 16);
+                    cpu.setRegister((unsigned)reg, val);
+                }
+            };
+            setReg("pc", R::RegisterPC);
+            setReg("a",  R::RegisterA);
+            setReg("x",  R::RegisterX);
+            setReg("y",  R::RegisterY);
+            setReg("s",  R::RegisterS);
+            setReg("d",  R::RegisterD);
+            setReg("db", R::RegisterDB);
+            setReg("p",  R::RegisterP);
+
+            // Parse boolean flag values from nested "flags" object
+            if (body.contains("flags") && body["flags"].is_object()) {
+                auto& f = body["flags"];
+                if (f.contains("e") && f["e"].is_boolean()) cpu.setFlag(F::FlagE, f["e"].get<bool>());
+                if (f.contains("n") && f["n"].is_boolean()) cpu.setFlag(F::FlagN, f["n"].get<bool>());
+                if (f.contains("v") && f["v"].is_boolean()) cpu.setFlag(F::FlagV, f["v"].get<bool>());
+                if (f.contains("m") && f["m"].is_boolean()) cpu.setFlag(F::FlagM, f["m"].get<bool>());
+                if (f.contains("x") && f["x"].is_boolean()) cpu.setFlag(F::FlagX, f["x"].get<bool>());
+                if (f.contains("d") && f["d"].is_boolean()) cpu.setFlag(F::FlagD, f["d"].get<bool>());
+                if (f.contains("i") && f["i"].is_boolean()) cpu.setFlag(F::FlagI, f["i"].get<bool>());
+                if (f.contains("z") && f["z"].is_boolean()) cpu.setFlag(F::FlagZ, f["z"].get<bool>());
+                if (f.contains("c") && f["c"].is_boolean()) cpu.setFlag(F::FlagC, f["c"].get<bool>());
+            }
+            result = getCpuStateJson();
+        }, true);
+        sendJson(res, result);
+    });
+
+    // ── GET /cpu/disassemble?addr=C08000&lines=10 ────────────────────────────
+    _svr->Get("/cpu/disassemble", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        if (!req.has_param("addr")) {
+            sendError(res, 400, "MISSING_PARAM", "Query param 'addr' is required."); return;
+        }
+        uint32_t addr;
+        int lines = 10;
+        try {
+            addr  = (uint32_t)std::stoul(req.get_param_value("addr"), nullptr, 16);
+            if (req.has_param("lines"))
+                lines = std::stoi(req.get_param_value("lines"));
+        } catch (...) {
+            sendError(res, 400, "INVALID_PARAM", "Could not parse addr or lines."); return;
+        }
+        lines = std::min(std::max(lines, 1), 256);
+        json result;
+        dispatch([this, &result, addr, lines]() {
+            result = disassembleAt(addr, lines);
+        }, true);
+        sendJson(res, result);
+    });
+
+    // ── GET /cpu/usage?addr=C08000&count=256 ─────────────────────────────────
+    _svr->Get("/cpu/usage", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        if (!req.has_param("addr")) {
+            sendError(res, 400, "MISSING_PARAM", "Query param 'addr' is required."); return;
+        }
+        uint32_t addr;
+        int count = 256;
+        try {
+            addr  = (uint32_t)std::stoul(req.get_param_value("addr"), nullptr, 16);
+            if (req.has_param("count"))
+                count = std::stoi(req.get_param_value("count"));
+        } catch (...) {
+            sendError(res, 400, "INVALID_PARAM", "Could not parse addr or count."); return;
+        }
+        count = std::min(std::max(count, 1), 65536);
+        json result;
+        dispatch([this, &result, addr, count]() {
+            using U = CPUDebugger;
+            result = json::array();
+            for (int i = 0; i < count; ++i) {
+                uint32_t a = (addr + i) & 0xFFFFFF;
+                uint8_t  u = SNES::cpu.usage[a];
+                result.push_back({
+                    {"addr",   hexStr(a, 6)},
+                    {"read",   (bool)(u & U::UsageRead)},
+                    {"write",  (bool)(u & U::UsageWrite)},
+                    {"exec",   (bool)(u & U::UsageExec)},
+                    {"opcode", (bool)(u & U::UsageOpcode)},
+                    {"flagM",  (bool)(u & U::UsageFlagM)},
+                    {"flagX",  (bool)(u & U::UsageFlagX)},
+                });
+            }
+        }, true);
+        sendJson(res, result);
+    });

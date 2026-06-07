@@ -33,7 +33,7 @@ BsnesApiServer::~BsnesApiServer() {
 // ── start / stop ─────────────────────────────────────────────────────────────
 
 void BsnesApiServer::start(int port) {
-    _svr = std::make_unique<httplib::Server>();
+    _svr.reset(new httplib::Server());
     setupRoutes();
     _serverThread = std::thread([this, port]() {
         _svr->listen("127.0.0.1", port);
@@ -124,8 +124,8 @@ json BsnesApiServer::doStep(SNES::Debugger::StepType type,
 // Must be called from the Qt main thread (emulator paused).
 
 json BsnesApiServer::getCpuStateJson() {
-    using R = CPUDebugger::Register;
-    using F = CPUDebugger;
+    using R = SNES::CPUDebugger::Register;
+    using F = SNES::CPUDebugger;
     auto& cpu = SNES::cpu;
 
     json regs = {
@@ -203,7 +203,7 @@ json BsnesApiServer::disassembleAt(uint32_t addr, int lines) {
         int len = 1;
         for (int k = 1; k <= 4; ++k) {
             uint32_t next = (addr + k) & 0xFFFFFF;
-            if (SNES::cpu.usage[next] & CPUDebugger::UsageOpcode) {
+            if (SNES::cpu.usage[next] & SNES::CPUDebugger::UsageOpcode) {
                 len = k;
                 break;
             }
@@ -494,8 +494,8 @@ void BsnesApiServer::setupRoutes() {
 
         json result;
         dispatch([this, &body, &result]() {
-            using R = CPUDebugger::Register;
-            using F = CPUDebugger;
+            using R = SNES::CPUDebugger::Register;
+            using F = SNES::CPUDebugger;
             auto& cpu = SNES::cpu;
 
             // Parse hex-string register values
@@ -573,7 +573,7 @@ void BsnesApiServer::setupRoutes() {
         count = std::min(std::max(count, 1), 65536);
         json result;
         dispatch([this, &result, addr, count]() {
-            using U = CPUDebugger;
+            using U = SNES::CPUDebugger;
             result = json::array();
             for (int i = 0; i < count; ++i) {
                 uint32_t a = (addr + i) & 0xFFFFFF;

@@ -591,3 +591,67 @@ void BsnesApiServer::setupRoutes() {
         }, true);
         sendJson(res, result);
     });
+
+    // ── GET /memory/{source}?addr=7E0000&count=16 ────────────────────────────
+    _svr->Get("/memory/:source", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        std::string srcName = req.path_params.at("source");
+        SNES::Debugger::MemorySource src;
+        if (!parseSource(srcName, src)) {
+            sendError(res, 400, "INVALID_SOURCE", "Unknown memory source: " + srcName);
+            return;
+        }
+        if (!req.has_param("addr")) {
+            sendError(res, 400, "MISSING_PARAM", "'addr' is required."); return;
+        }
+        uint32_t addr;
+        int count = 256;
+        try {
+            addr  = (uint32_t)std::stoul(req.get_param_value("addr"), nullptr, 16);
+            if (req.has_param("count"))
+                count = std::stoi(req.get_param_value("count"));
+        } catch (...) {
+            sendError(res, 400, "INVALID_PARAM", "Could not parse addr or count."); return;
+        }
+        json result;
+        dispatch([this, &result, srcName, addr, count]() {
+            result = readMemory(srcName, addr, count);
+        }, true);
+        sendJson(res, result);
+    });
+
+    // ── PUT /memory/{source}?addr=7E0000  body: {"data":[0,1,2,...]} ─────────
+    _svr->Put("/memory/:source", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        std::string srcName = req.path_params.at("source");
+        SNES::Debugger::MemorySource src;
+        if (!parseSource(srcName, src)) {
+            sendError(res, 400, "INVALID_SOURCE", "Unknown memory source: " + srcName);
+            return;
+        }
+        if (!req.has_param("addr")) {
+            sendError(res, 400, "MISSING_PARAM", "'addr' is required."); return;
+        }
+        uint32_t addr;
+        try { addr = (uint32_t)std::stoul(req.get_param_value("addr"), nullptr, 16); }
+        catch (...) { sendError(res, 400, "INVALID_PARAM", "Could not parse addr."); return; }
+
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_JSON", "Body is not valid JSON."); return; }
+
+        if (!body.contains("data") || !body["data"].is_array()) {
+            sendError(res, 400, "MISSING_FIELD", "'data' array is required."); return;
+        }
+        std::vector<uint8_t> data;
+        for (auto& elem : body["data"]) {
+            if (!elem.is_number_integer()) {
+                sendError(res, 400, "INVALID_DATA", "data elements must be integers."); return;
+            }
+            data.push_back((uint8_t)elem.get<int>());
+        }
+        dispatch([this, srcName, addr, data]() {
+            writeMemory(srcName, addr, data);
+        }, true);
+        sendJson(res, {{"written", (int)data.size()}, {"addr", hexStr(addr, 6)}});
+    });

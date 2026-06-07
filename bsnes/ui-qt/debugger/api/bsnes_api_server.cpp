@@ -420,3 +420,57 @@ void BsnesApiServer::setupRoutes() {
         }, /*blocking=*/false);
         sendJson(res, {{"accepted", true}});
     });
+
+    // ── POST /step/into ──────────────────────────────────────────────────────
+    _svr->Post("/step/into", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepInto);
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /step/over ──────────────────────────────────────────────────────
+    _svr->Post("/step/over", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepOver,
+                             /*stepOverNew=*/true);
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /step/out ───────────────────────────────────────────────────────
+    _svr->Post("/step/out", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepOut);
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /step/vblank ────────────────────────────────────────────────────
+    _svr->Post("/step/vblank", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepToVBlank,
+                             false, std::chrono::seconds(30));
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /step/hblank ────────────────────────────────────────────────────
+    _svr->Post("/step/hblank", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepToHBlank,
+                             false, std::chrono::seconds(30));
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /step/nmi ───────────────────────────────────────────────────────
+    _svr->Post("/step/nmi", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepToNMI,
+                             false, std::chrono::seconds(30));
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /step/irq ───────────────────────────────────────────────────────
+    _svr->Post("/step/irq", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepToIRQ,
+                             false, std::chrono::seconds(30));
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });

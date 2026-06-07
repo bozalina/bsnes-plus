@@ -119,3 +119,109 @@ json BsnesApiServer::doStep(SNES::Debugger::StepType type,
     }
     return _lastBreakResult;
 }
+
+// ── getCpuStateJson ───────────────────────────────────────────────────────────
+// Must be called from the Qt main thread (emulator paused).
+
+json BsnesApiServer::getCpuStateJson() {
+    using R = CPUDebugger::Register;
+    using F = CPUDebugger;
+    auto& cpu = SNES::cpu;
+
+    json regs = {
+        {"pc", hexStr(cpu.getRegister(R::RegisterPC), 6)},
+        {"a",  hexStr(cpu.getRegister(R::RegisterA),  4)},
+        {"x",  hexStr(cpu.getRegister(R::RegisterX),  4)},
+        {"y",  hexStr(cpu.getRegister(R::RegisterY),  4)},
+        {"s",  hexStr(cpu.getRegister(R::RegisterS),  4)},
+        {"d",  hexStr(cpu.getRegister(R::RegisterD),  4)},
+        {"db", hexStr(cpu.getRegister(R::RegisterDB), 2)},
+        {"p",  hexStr(cpu.getRegister(R::RegisterP),  2)},
+    };
+
+    json flags = {
+        {"e", cpu.getFlag(F::FlagE)},
+        {"n", cpu.getFlag(F::FlagN)},
+        {"v", cpu.getFlag(F::FlagV)},
+        {"m", cpu.getFlag(F::FlagM)},
+        {"x", cpu.getFlag(F::FlagX)},
+        {"d", cpu.getFlag(F::FlagD)},
+        {"i", cpu.getFlag(F::FlagI)},
+        {"z", cpu.getFlag(F::FlagZ)},
+        {"c", cpu.getFlag(F::FlagC)},
+    };
+
+    return {{"registers", regs}, {"flags", flags}};
+}
+
+// ── buildBreakResult ──────────────────────────────────────────────────────────
+// Assembles the JSON payload returned by break/step endpoints.
+// Must be called from the Qt main thread.
+
+json BsnesApiServer::buildBreakResult() {
+    char buf[256];
+    SNES::cpu.disassemble_opcode(buf, SNES::cpu.opcode_pc, false);
+
+    std::string breakEvent;
+    switch (SNES::debugger.break_event) {
+        case SNES::Debugger::BreakEvent::BreakpointHit: breakEvent = "BreakpointHit"; break;
+        case SNES::Debugger::BreakEvent::CPUStep:       breakEvent = "CPUStep";       break;
+        case SNES::Debugger::BreakEvent::SMPStep:       breakEvent = "SMPStep";       break;
+        case SNES::Debugger::BreakEvent::SA1Step:       breakEvent = "SA1Step";       break;
+        case SNES::Debugger::BreakEvent::SFXStep:       breakEvent = "SFXStep";       break;
+        case SNES::Debugger::BreakEvent::SGBStep:       breakEvent = "SGBStep";       break;
+        default:                                         breakEvent = "None";          break;
+    }
+
+    json result = {
+        {"paused",        true},
+        {"breakEvent",    breakEvent},
+        {"breakpointHit", (int)SNES::debugger.breakpoint_hit},
+        {"opcodeAddr",    hexStr(SNES::cpu.opcode_pc, 6)},
+        {"disasm",        std::string(buf)},
+        {"cpu",           getCpuStateJson()},
+    };
+    return result;
+}
+
+// ── disassembleAt ─────────────────────────────────────────────────────────────
+// Returns an array of { addr, bytes, text } for 'lines' instructions starting
+// at 'addr'. Uses the CPU usage array to find instruction boundaries; if no
+// usage data exists for a location, treats each unknown byte as 1-byte.
+// Must be called from the Qt main thread.
+
+json BsnesApiServer::disassembleAt(uint32_t addr, int lines) {
+    json result = json::array();
+
+    for (int i = 0; i < lines; ++i) {
+        addr &= 0xFFFFFF;
+        char buf[256];
+        SNES::cpu.disassemble_opcode(buf, addr, false);
+
+        // Determine instruction length by scanning the usage array for the
+        // next UsageOpcode marker within the next 1-4 bytes.
+        int len = 1;
+        for (int k = 1; k <= 4; ++k) {
+            uint32_t next = (addr + k) & 0xFFFFFF;
+            if (SNES::cpu.usage[next] & CPUDebugger::UsageOpcode) {
+                len = k;
+                break;
+            }
+        }
+
+        json bytes = json::array();
+        for (int b = 0; b < len; ++b) {
+            bytes.push_back((int)SNES::debugger.read(
+                SNES::Debugger::MemorySource::CPUBus, (addr + b) & 0xFFFFFF));
+        }
+
+        result.push_back({
+            {"addr",  hexStr(addr, 6)},
+            {"bytes", bytes},
+            {"text",  std::string(buf)},
+        });
+
+        addr = (addr + len) & 0xFFFFFF;
+    }
+    return result;
+}

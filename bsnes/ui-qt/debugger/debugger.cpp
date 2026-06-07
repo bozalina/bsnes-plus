@@ -60,6 +60,8 @@ static QIcon themedIcon(const QString &path) {
 #include "ppu/oam-viewer.cpp"
 #include "ppu/cgram-viewer.cpp"
 
+#include "api/bsnes_api_server.cpp"
+
 Debugger::Debugger() {
   setObjectName("debugger");
   setWindowTitle("Debugger");
@@ -279,6 +281,9 @@ Debugger::Debugger() {
   usageTimer = new QTimer(this);
   connect(usageTimer, SIGNAL(timeout()), this, SLOT(saveUsageToDisk()));
   usageTimer->start(60000);
+
+  bsnesApiServer = new BsnesApiServer();
+  bsnesApiServer->start(5744);
 }
 
 void Debugger::createMemoryEditor() {
@@ -479,6 +484,11 @@ void Debugger::hide() {
 void Debugger::closeEvent(QCloseEvent *event) {
   Window::closeEvent(event);
   application.debug = application.debugrun = false;
+  if (bsnesApiServer) {
+      bsnesApiServer->stop();
+      delete bsnesApiServer;
+      bsnesApiServer = nullptr;
+  }
 }
 
 void Debugger::clear() {
@@ -712,6 +722,10 @@ void Debugger::event() {
   if(!SNES::debugger.log_without_break) {
     show();
     activateWindow();
+  }
+
+  if (bsnesApiServer) {
+      bsnesApiServer->notifyBreak();
   }
 }
 

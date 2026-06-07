@@ -186,21 +186,39 @@ json BsnesApiServer::buildBreakResult() {
 }
 
 // ── disassembleAt ─────────────────────────────────────────────────────────────
-// Returns an array of { addr, bytes, text } for 'lines' instructions starting
-// at 'addr'. Uses the CPU usage array to find instruction boundaries; if no
-// usage data exists for a location, treats each unknown byte as 1-byte.
+// Returns a JSON object with disassembly results. The starting address must
+// have been executed (UsageOpcode set); returns a startError sentinel otherwise.
 // Must be called from the Qt main thread.
 
 json BsnesApiServer::disassembleAt(uint32_t addr, int lines) {
-    json result = json::array();
+    addr &= 0xFFFFFF;
+
+    if (!(SNES::cpu.usage[addr] & SNES::CPUDebugger::UsageOpcode)) {
+        return {
+            {"startError", true},
+            {"message",
+             "Address " + hexStr(addr, 6) +
+             " has not been executed; M/X state is unknown. "
+             "Run to this address first."}
+        };
+    }
+
+    json instructions = json::array();
+    bool truncated    = false;
+    uint32_t truncAt  = 0;
 
     for (int i = 0; i < lines; ++i) {
         addr &= 0xFFFFFF;
+
+        if (i > 0 && !(SNES::cpu.usage[addr] & SNES::CPUDebugger::UsageOpcode)) {
+            truncated = true;
+            truncAt   = addr;
+            break;
+        }
+
         char buf[256];
         SNES::cpu.disassemble_opcode(buf, addr, false);
 
-        // Determine instruction length by scanning the usage array for the
-        // next UsageOpcode marker within the next 1-4 bytes.
         int len = 1;
         for (int k = 1; k <= 4; ++k) {
             uint32_t next = (addr + k) & 0xFFFFFF;
@@ -211,12 +229,11 @@ json BsnesApiServer::disassembleAt(uint32_t addr, int lines) {
         }
 
         json bytes = json::array();
-        for (int b = 0; b < len; ++b) {
+        for (int b = 0; b < len; ++b)
             bytes.push_back((int)SNES::debugger.read(
                 SNES::Debugger::MemorySource::CPUBus, (addr + b) & 0xFFFFFF));
-        }
 
-        result.push_back({
+        instructions.push_back({
             {"addr",  hexStr(addr, 6)},
             {"bytes", bytes},
             {"text",  std::string(buf)},
@@ -224,6 +241,14 @@ json BsnesApiServer::disassembleAt(uint32_t addr, int lines) {
 
         addr = (addr + len) & 0xFFFFFF;
     }
+
+    json result = {
+        {"startError",   false},
+        {"instructions", instructions},
+        {"truncated",    truncated},
+    };
+    if (truncated)
+        result["truncatedAt"] = hexStr(truncAt, 6);
     return result;
 }
 
@@ -537,7 +562,7 @@ void BsnesApiServer::setupRoutes() {
     _svr->Get("/cpu/disassemble", [this](const httplib::Request& req, httplib::Response& res) {
         if (!requirePaused(res)) return;
         if (!req.has_param("addr")) {
-            sendError(res, 400, "MISSING_PARAM", "Query param 'addr' is required."); return;
+            sendError(res, 400, "MISSING_PARAM", "'addr' is required."); return;
         }
         uint32_t addr;
         int lines = 10;
@@ -546,13 +571,21 @@ void BsnesApiServer::setupRoutes() {
             if (req.has_param("lines"))
                 lines = std::stoi(req.get_param_value("lines"));
         } catch (...) {
-            sendError(res, 400, "INVALID_PARAM", "Could not parse addr or lines."); return;
+            sendError(res, 400, "INVALID_PARAM", "Cannot parse addr or lines."); return;
         }
-        lines = std::min(std::max(lines, 1), 256);
+        lines = std::max(1, std::min(lines, 256));
+
         json result;
         dispatch([this, &result, addr, lines]() {
             result = disassembleAt(addr, lines);
         }, true);
+
+        if (result.value("startError", false)) {
+            sendError(res, 422, "UNTRACED_ADDRESS",
+                      result.value("message", "Address has not been executed."));
+            return;
+        }
+        result.erase("startError");
         sendJson(res, result);
     });
 
@@ -784,35 +817,556 @@ void BsnesApiServer::setupRoutes() {
     });
 
     // ── GET /openapi.json ────────────────────────────────────────────────────
-    _svr->Get("/openapi.json", [this](const httplib::Request&, httplib::Response& res) {
-        static const std::string openapi = R"({
+    _svr->Get("/openapi.json", [](const httplib::Request&, httplib::Response& res) {
+        static const std::string openapi = R"OPENAPI(
+{
   "openapi": "3.0.3",
-  "info": { "title": "bsnes-plus Debug API", "version": "1.0.0" },
+  "info": {
+    "title": "bsnes-plus Debug API",
+    "version": "1.0.0",
+    "description": "Embedded HTTP debug API for bsnes-plus. Exposes CPU state, memory, breakpoints and execution control for external tooling. All SNES addresses are uppercase hex strings zero-padded to 6 digits (e.g. \"C0A3F2\"). Register values are uppercase hex strings. Flag values are booleans."
+  },
   "servers": [{ "url": "http://127.0.0.1:5744" }],
+
+  "components": {
+    "schemas": {
+
+      "CpuRegisters": {
+        "type": "object",
+        "description": "65C816 register values as uppercase hex strings.",
+        "properties": {
+          "pc": { "type": "string", "example": "C0A3F2" },
+          "a":  { "type": "string", "example": "0042" },
+          "x":  { "type": "string", "example": "0001" },
+          "y":  { "type": "string", "example": "0000" },
+          "s":  { "type": "string", "example": "01FF" },
+          "d":  { "type": "string", "example": "0000" },
+          "db": { "type": "string", "example": "C0" },
+          "p":  { "type": "string", "example": "30" }
+        }
+      },
+
+      "CpuFlags": {
+        "type": "object",
+        "description": "65C816 processor status flags.",
+        "properties": {
+          "e": { "type": "boolean", "description": "Emulation mode" },
+          "n": { "type": "boolean", "description": "Negative" },
+          "v": { "type": "boolean", "description": "Overflow" },
+          "m": { "type": "boolean", "description": "Accumulator width (true=8-bit)" },
+          "x": { "type": "boolean", "description": "Index width (true=8-bit)" },
+          "d": { "type": "boolean", "description": "Decimal mode" },
+          "i": { "type": "boolean", "description": "IRQ disable" },
+          "z": { "type": "boolean", "description": "Zero" },
+          "c": { "type": "boolean", "description": "Carry" }
+        }
+      },
+
+      "CpuState": {
+        "type": "object",
+        "properties": {
+          "registers": { "$ref": "#/components/schemas/CpuRegisters" },
+          "flags":     { "$ref": "#/components/schemas/CpuFlags" }
+        }
+      },
+
+      "BreakResult": {
+        "type": "object",
+        "description": "Returned by break and all step endpoints after execution halts.",
+        "properties": {
+          "paused":        { "type": "boolean" },
+          "breakEvent":    { "type": "string",
+                             "enum": ["CPUStep","BreakpointHit","SMPStep","SA1Step","SFXStep","SGBStep","None"] },
+          "breakpointHit": { "type": "integer",
+                             "description": "Index of triggered breakpoint, or -1." },
+          "opcodeAddr":    { "type": "string", "example": "C0A3F2" },
+          "disasm":        { "type": "string",
+                             "example": "C0/A3F2 LDA #$01" },
+          "cpu":           { "$ref": "#/components/schemas/CpuState" }
+        }
+      },
+
+      "StatusResult": {
+        "type": "object",
+        "properties": {
+          "paused":     { "type": "boolean" },
+          "loaded":     { "type": "boolean",
+                          "description": "True if a cartridge is loaded." },
+          "breakEvent": { "type": "string",
+                          "enum": ["CPUStep","BreakpointHit","SMPStep","SA1Step","SFXStep","SGBStep","None"] },
+          "cpu":        { "description": "Null when not paused.",
+                          "oneOf": [
+                            { "$ref": "#/components/schemas/CpuState" },
+                            { "type": "null" }
+                          ]}
+        }
+      },
+
+      "DisassemblyLine": {
+        "type": "object",
+        "properties": {
+          "addr":  { "type": "string", "example": "C0A3F2" },
+          "bytes": { "type": "array", "items": { "type": "integer" },
+                     "description": "Raw opcode and operand bytes." },
+          "text":  { "type": "string", "example": "C0/A3F2 LDA #$01" }
+        }
+      },
+
+      "DisassemblyResult": {
+        "type": "object",
+        "properties": {
+          "instructions": { "type": "array",
+                            "items": { "$ref": "#/components/schemas/DisassemblyLine" } },
+          "truncated":    { "type": "boolean",
+                            "description": "True if the walk hit an untraced address before completing all requested lines." },
+          "truncatedAt":  { "type": "string",
+                            "description": "Address where truncation occurred. Present only when truncated is true.",
+                            "example": "C0A412" }
+        }
+      },
+
+      "UsageFlagEntry": {
+        "type": "object",
+        "properties": {
+          "addr":   { "type": "string", "example": "C0A3F2" },
+          "exec":   { "type": "boolean" },
+          "opcode": { "type": "boolean" },
+          "read":   { "type": "boolean" },
+          "write":  { "type": "boolean" },
+          "flagM":  { "type": "boolean",
+                      "description": "M flag value recorded at last execution." },
+          "flagX":  { "type": "boolean",
+                      "description": "X flag value recorded at last execution." }
+        }
+      },
+
+      "MemoryReadResult": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string", "example": "cpu" },
+          "addr":   { "type": "string", "example": "7E0000" },
+          "count":  { "type": "integer" },
+          "data":   { "type": "array", "items": { "type": "integer",
+                                                   "minimum": 0,
+                                                   "maximum": 255 } }
+        }
+      },
+
+      "Breakpoint": {
+        "type": "object",
+        "properties": {
+          "index":   { "type": "integer" },
+          "addr":    { "type": "string", "example": "C0A3F2" },
+          "addrEnd": { "type": "string",
+                       "description": "End of address range. Omitted for single-address breakpoints." },
+          "data":    { "type": "integer",
+                       "description": "-1 means no data condition." },
+          "compare": { "type": "string",
+                       "enum": ["Equal","NotEqual","Less","LessEqual","Greater","GreaterEqual"] },
+          "mode":    { "type": "array",
+                       "items": { "type": "string", "enum": ["Exec","Read","Write"] } },
+          "source":  { "type": "string",
+                       "enum": ["CPUBus","APURAM","DSP","VRAM","OAM","CGRAM","SA1Bus","SFXBus","SGBBus"] },
+          "counter": { "type": "integer",
+                       "description": "Number of times this breakpoint has been hit." }
+        }
+      },
+
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error":   { "type": "string", "description": "Machine-readable error code." },
+          "message": { "type": "string", "description": "Human-readable description." }
+        }
+      }
+    },
+
+    "responses": {
+      "NotPaused": {
+        "description": "Emulator is not paused. POST /break first.",
+        "content": { "application/json": {
+          "schema": { "$ref": "#/components/schemas/Error" }
+        }}
+      },
+      "NoCartridge": {
+        "description": "No cartridge is loaded.",
+        "content": { "application/json": {
+          "schema": { "$ref": "#/components/schemas/Error" }
+        }}
+      }
+    }
+  },
+
   "paths": {
-    "/status":           { "get":    { "summary": "Emulator status",            "operationId": "getStatus"        } },
-    "/break":            { "post":   { "summary": "Break execution",            "operationId": "postBreak"        } },
-    "/resume":           { "post":   { "summary": "Resume to next break",       "operationId": "postResume"       } },
-    "/run":              { "post":   { "summary": "Run at full speed",          "operationId": "postRun"          } },
-    "/step/into":        { "post":   { "summary": "Step into one instruction",  "operationId": "stepInto"         } },
-    "/step/over":        { "post":   { "summary": "Step over one instruction",  "operationId": "stepOver"         } },
-    "/step/out":         { "post":   { "summary": "Step out of subroutine",     "operationId": "stepOut"          } },
-    "/step/vblank":      { "post":   { "summary": "Run to next VBlank",         "operationId": "stepVBlank"       } },
-    "/step/hblank":      { "post":   { "summary": "Run to next HBlank",         "operationId": "stepHBlank"       } },
-    "/step/nmi":         { "post":   { "summary": "Run to next NMI",            "operationId": "stepNMI"          } },
-    "/step/irq":         { "post":   { "summary": "Run to next IRQ",            "operationId": "stepIRQ"          } },
-    "/cpu/registers":    { "get":    { "summary": "Read CPU registers",         "operationId": "getRegisters"     },
-                           "put":    { "summary": "Write CPU registers",        "operationId": "putRegisters"     } },
-    "/cpu/disassemble":  { "get":    { "summary": "Disassemble at address",     "operationId": "disassemble"      } },
-    "/cpu/usage":        { "get":    { "summary": "CPU usage map at address",   "operationId": "getUsage"         } },
-    "/memory/{source}":  { "get":    { "summary": "Read memory",                "operationId": "readMemory"       },
-                           "put":    { "summary": "Write memory",               "operationId": "writeMemory"      } },
-    "/breakpoints":      { "get":    { "summary": "List breakpoints",           "operationId": "listBreakpoints"  },
-                           "post":   { "summary": "Add breakpoint",             "operationId": "addBreakpoint"    },
-                           "delete": { "summary": "Clear all breakpoints",      "operationId": "clearBreakpoints" } },
-    "/breakpoints/{index}": { "delete": { "summary": "Remove breakpoint",       "operationId": "deleteBreakpoint" } }
+
+    "/status": {
+      "get": {
+        "summary": "Emulator status",
+        "operationId": "getStatus",
+        "description": "Returns current execution state. Safe to call at any time regardless of pause state.",
+        "responses": {
+          "200": { "description": "OK",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/StatusResult" }
+                   }}}
+        }
+      }
+    },
+
+    "/break": {
+      "post": {
+        "summary": "Break execution",
+        "operationId": "postBreak",
+        "description": "Pauses the emulator immediately and returns the current CPU state.",
+        "responses": {
+          "200": { "description": "Execution paused",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/BreakResult" }
+                   }}}
+        }
+      }
+    },
+
+    "/resume": {
+      "post": {
+        "summary": "Resume execution",
+        "operationId": "postResume",
+        "description": "Releases the emulator to run until the next break event. Returns immediately without waiting.",
+        "responses": {
+          "200": { "description": "Accepted",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                                 "properties": { "accepted": { "type": "boolean" } } }
+                   }}}
+        }
+      }
+    },
+
+    "/run": {
+      "post": {
+        "summary": "Run at full speed",
+        "operationId": "postRun",
+        "description": "Exits debug mode entirely. The emulator runs without breaking on steps or breakpoints.",
+        "responses": {
+          "200": { "description": "Accepted",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                                 "properties": { "accepted": { "type": "boolean" } } }
+                   }}}
+        }
+      }
+    },
+
+    "/step/into": {
+      "post": {
+        "summary": "Step into one instruction",
+        "operationId": "stepInto",
+        "description": "Executes exactly one CPU instruction and returns the resulting state. Blocks until complete.",
+        "responses": {
+          "200": { "description": "Step complete",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/BreakResult" }
+                   }}},
+          "408": { "description": "Step timed out (30s)" }
+        }
+      }
+    },
+
+    "/step/over": {
+      "post": {
+        "summary": "Step over one instruction",
+        "operationId": "stepOver",
+        "description": "Executes one instruction, stepping over JSR/JSL calls rather than entering them.",
+        "responses": {
+          "200": { "description": "Step complete",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/BreakResult" }
+                   }}},
+          "408": { "description": "Step timed out (30s)" }
+        }
+      }
+    },
+
+    "/step/out": {
+      "post": {
+        "summary": "Step out of subroutine",
+        "operationId": "stepOut",
+        "description": "Runs until the current subroutine returns (RTS/RTL/RTI).",
+        "responses": {
+          "200": { "description": "Step complete",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/BreakResult" }
+                   }}},
+          "408": { "description": "Step timed out (30s)" }
+        }
+      }
+    },
+
+    "/step/vblank": {
+      "post": { "summary": "Run to next VBlank", "operationId": "stepVBlank",
+        "responses": { "200": { "description": "Reached VBlank",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BreakResult" } } } },
+          "408": { "description": "Timed out" } } }
+    },
+    "/step/hblank": {
+      "post": { "summary": "Run to next HBlank", "operationId": "stepHBlank",
+        "responses": { "200": { "description": "Reached HBlank",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BreakResult" } } } },
+          "408": { "description": "Timed out" } } }
+    },
+    "/step/nmi": {
+      "post": { "summary": "Run to next NMI", "operationId": "stepNMI",
+        "responses": { "200": { "description": "Reached NMI",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BreakResult" } } } },
+          "408": { "description": "Timed out" } } }
+    },
+    "/step/irq": {
+      "post": { "summary": "Run to next IRQ", "operationId": "stepIRQ",
+        "responses": { "200": { "description": "Reached IRQ",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BreakResult" } } } },
+          "408": { "description": "Timed out" } } }
+    },
+
+    "/cpu/registers": {
+      "get": {
+        "summary": "Read CPU registers and flags",
+        "operationId": "getRegisters",
+        "description": "Returns all 65C816 registers and processor flags. Requires paused state.",
+        "responses": {
+          "200": { "description": "OK",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/CpuState" }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" },
+          "503": { "$ref": "#/components/responses/NoCartridge" }
+        }
+      },
+      "put": {
+        "summary": "Write CPU registers and/or flags",
+        "operationId": "putRegisters",
+        "description": "Sets one or more registers or flags. Omitted fields are unchanged. Flags must be nested inside a 'flags' object. Requires paused state.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": {
+              "type": "object",
+              "description": "Any combination of register (hex string) fields and an optional 'flags' object.",
+              "properties": {
+                "pc": { "type": "string" }, "a": { "type": "string" },
+                "x":  { "type": "string" }, "y": { "type": "string" },
+                "s":  { "type": "string" }, "d": { "type": "string" },
+                "db": { "type": "string" }, "p": { "type": "string" },
+                "flags": {
+                  "type": "object",
+                  "description": "Processor status flags to update.",
+                  "properties": {
+                    "e": { "type": "boolean" }, "n": { "type": "boolean" },
+                    "v": { "type": "boolean" }, "m": { "type": "boolean" },
+                    "x": { "type": "boolean" }, "d": { "type": "boolean" },
+                    "i": { "type": "boolean" }, "z": { "type": "boolean" },
+                    "c": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }}
+        },
+        "responses": {
+          "200": { "description": "Updated state",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/CpuState" }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/cpu/disassemble": {
+      "get": {
+        "summary": "Disassemble instructions at a SNES address",
+        "operationId": "disassemble",
+        "description": "Returns up to 'lines' disassembled instructions starting at 'addr'. The starting address must have been executed at least once (has UsageOpcode set). Returns 422 if the address is untraced. The walk stops early and sets truncated=true if it reaches an untraced address.",
+        "parameters": [
+          { "name": "addr", "in": "query", "required": true,
+            "schema": { "type": "string" }, "example": "C0A3F2",
+            "description": "SNES address in hex." },
+          { "name": "lines", "in": "query", "required": false,
+            "schema": { "type": "integer", "default": 10, "maximum": 256 },
+            "description": "Maximum number of instructions to return." }
+        ],
+        "responses": {
+          "200": { "description": "Disassembly result",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/DisassemblyResult" }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" },
+          "422": { "description": "Address has not been executed. Run to it first.",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/Error" }
+                   }}}
+        }
+      }
+    },
+
+    "/cpu/usage": {
+      "get": {
+        "summary": "CPU usage map",
+        "operationId": "getUsage",
+        "description": "Returns per-byte execution history flags for a range of SNES addresses.",
+        "parameters": [
+          { "name": "addr",  "in": "query", "required": true,
+            "schema": { "type": "string" }, "description": "Start SNES address in hex." },
+          { "name": "count", "in": "query", "required": true,
+            "schema": { "type": "integer" }, "description": "Number of bytes to return." }
+        ],
+        "responses": {
+          "200": { "description": "Usage flags",
+                   "content": { "application/json": {
+                     "schema": { "type": "array",
+                                 "items": { "$ref": "#/components/schemas/UsageFlagEntry" } }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/memory/{source}": {
+      "get": {
+        "summary": "Read memory",
+        "operationId": "readMemory",
+        "description": "Reads bytes from the specified memory bus. Requires paused state. Count is capped at 4096.",
+        "parameters": [
+          { "name": "source", "in": "path", "required": true,
+            "schema": { "type": "string",
+                        "enum": ["cpu","apu","apuram","dsp","vram","oam","cgram","cartrom","cartram"] } },
+          { "name": "addr",  "in": "query", "required": true,
+            "schema": { "type": "string" }, "description": "Start address in hex." },
+          { "name": "count", "in": "query", "required": false,
+            "schema": { "type": "integer", "default": 256, "maximum": 4096 } }
+        ],
+        "responses": {
+          "200": { "description": "Memory contents",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/MemoryReadResult" }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      },
+      "put": {
+        "summary": "Write memory",
+        "operationId": "writeMemory",
+        "description": "Writes bytes to the specified memory bus. Requires paused state. Limited to 4096 bytes per call.",
+        "parameters": [
+          { "name": "source", "in": "path", "required": true,
+            "schema": { "type": "string",
+                        "enum": ["cpu","apu","apuram","dsp","vram","oam","cgram","cartrom","cartram"] } },
+          { "name": "addr", "in": "query", "required": true,
+            "schema": { "type": "string" }, "description": "Start address in hex." }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["data"],
+              "properties": {
+                "data": { "type": "array",
+                          "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+                          "maxItems": 4096 }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "Write confirmed",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "written": { "type": "integer" },
+                         "addr":    { "type": "string" }
+                       }}
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/breakpoints": {
+      "get": {
+        "summary": "List all breakpoints",
+        "operationId": "listBreakpoints",
+        "responses": {
+          "200": { "description": "Breakpoint list",
+                   "content": { "application/json": {
+                     "schema": { "type": "array",
+                                 "items": { "$ref": "#/components/schemas/Breakpoint" } }
+                   }}}
+        }
+      },
+      "post": {
+        "summary": "Add a breakpoint",
+        "operationId": "addBreakpoint",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["mode", "source"],
+              "properties": {
+                "addr":    { "type": "string", "description": "Hex address (default 000000)." },
+                "addrEnd": { "type": "string", "description": "End of range (optional)." },
+                "data":    { "type": "integer", "description": "Data condition value. -1 disables.", "default": -1 },
+                "compare": { "type": "string",
+                             "enum": ["Equal","NotEqual","Less","LessEqual","Greater","GreaterEqual"],
+                             "default": "Equal" },
+                "mode":    { "type": "array",
+                             "items": { "type": "string", "enum": ["Exec","Read","Write"] },
+                             "minItems": 1 },
+                "source":  { "type": "string",
+                             "enum": ["CPUBus","APURAM","DSP","VRAM","OAM","CGRAM","SA1Bus","SFXBus","SGBBus"] }
+              }
+            }
+          }}
+        },
+        "responses": {
+          "201": { "description": "Breakpoint created",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/Breakpoint" }
+                   }}}
+        }
+      },
+      "delete": {
+        "summary": "Clear all breakpoints",
+        "operationId": "clearBreakpoints",
+        "responses": {
+          "200": { "description": "All cleared",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": { "cleared": { "type": "integer" } } }
+                   }}}
+        }
+      }
+    },
+
+    "/breakpoints/{index}": {
+      "delete": {
+        "summary": "Remove a breakpoint by index",
+        "operationId": "deleteBreakpoint",
+        "parameters": [
+          { "name": "index", "in": "path", "required": true,
+            "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Breakpoint removed",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": { "deleted": { "$ref": "#/components/schemas/Breakpoint" } } }
+                   }}},
+          "404": { "description": "No breakpoint at that index." }
+        }
+      }
+    }
   }
-})";
+}
+)OPENAPI";
         res.status = 200;
         res.set_content(openapi, "application/json");
     });

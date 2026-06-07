@@ -57,7 +57,7 @@ flags += -Wno-switch -Wno-parentheses
 # platform
 ifeq ($(platform),x)
   flags += `pkg-config --cflags dbus-1`
-  link += -ldl -lX11 -lXext -ldbus-1
+  link += -ldl -lX11 -lXext -ldbus-1 -lpthread
 else ifeq ($(platform),osx)
   osxbundle := ../bsnes+.app
   flags += -march=native -mmacosx-version-min=10.10

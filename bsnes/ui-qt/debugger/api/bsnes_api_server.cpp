@@ -501,6 +501,83 @@ void BsnesApiServer::setupRoutes() {
         sendJson(res, result, status);
     });
 
+    // ── POST /reset ──────────────────────────────────────────────────────────
+    _svr->Post("/reset", [this](const httplib::Request&, httplib::Response& res) {
+        bool ok = false;
+        dispatch([&ok]() {
+            if (!SNES::cartridge.loaded() || !application.power) return;
+            utility.modifySystemState(Utility::Reset);
+            ok = true;
+        }, true);
+        if (!ok) {
+            sendError(res, 409, "NOT_READY",
+                      "Reset requires a loaded cartridge with power on.");
+            return;
+        }
+        sendJson(res, {{"accepted", true}});
+    });
+
+    // ── POST /reload ─────────────────────────────────────────────────────────
+    _svr->Post("/reload", [this](const httplib::Request&, httplib::Response& res) {
+        bool ok = false;
+        dispatch([&ok]() {
+            if (application.currentRom == "") return;
+            utility.modifySystemState(Utility::ReloadCartridge);
+            ok = true;
+        }, true);
+        if (!ok) {
+            sendError(res, 409, "NO_ROM", "No ROM is currently loaded.");
+            return;
+        }
+        sendJson(res, {{"accepted", true}, {"name", (const char*)cartridge.name}});
+    });
+
+    // ── POST /power-cycle ────────────────────────────────────────────────────
+    _svr->Post("/power-cycle", [this](const httplib::Request&, httplib::Response& res) {
+        bool ok = false;
+        dispatch([&ok]() {
+            if (!SNES::cartridge.loaded()) return;
+            utility.modifySystemState(Utility::PowerCycle);
+            ok = true;
+        }, true);
+        if (!ok) {
+            sendError(res, 409, "NO_ROM", "No cartridge is loaded.");
+            return;
+        }
+        sendJson(res, {{"accepted", true}});
+    });
+
+    // ── POST /cartridge/load ─────────────────────────────────────────────────
+    _svr->Post("/cartridge/load", [this](const httplib::Request& req,
+                                         httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) {
+            sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return;
+        }
+        if (!body.contains("path") || !body["path"].is_string()) {
+            sendError(res, 400, "MISSING_PARAM", "'path' (string) is required."); return;
+        }
+
+        std::string path = body["path"].get<std::string>();
+        bool ok = false;
+        std::string loadedName;
+
+        dispatch([&]() {
+            if (cartridge.loadNormal(path.c_str())) {
+                ok = true;
+                loadedName = (const char*)cartridge.name;
+            }
+        }, true);
+
+        if (!ok) {
+            sendError(res, 422, "LOAD_FAILED",
+                      "Failed to load '" + path + "'. File may not exist or is not a valid ROM.");
+            return;
+        }
+        sendJson(res, {{"loaded", true}, {"name", loadedName}, {"path", path}});
+    });
+
     // ── GET /cpu/registers ───────────────────────────────────────────────────
     _svr->Get("/cpu/registers", [this](const httplib::Request&, httplib::Response& res) {
         if (!requirePaused(res)) return;
@@ -1125,6 +1202,91 @@ void BsnesApiServer::setupRoutes() {
         "responses": { "200": { "description": "Reached IRQ",
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BreakResult" } } } },
           "408": { "description": "Timed out" } } }
+    },
+
+    "/reset": {
+      "post": {
+        "summary": "Reset the SNES",
+        "operationId": "reset",
+        "description": "Sends a soft reset signal to the SNES. Requires a loaded cartridge with power on. The emulator continues running after reset — use POST /break to pause at the reset vector.",
+        "responses": {
+          "200": { "description": "Reset sent",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": { "accepted": { "type": "boolean" } } }
+                   }}},
+          "409": { "description": "No cartridge loaded or power is off." }
+        }
+      }
+    },
+
+    "/reload": {
+      "post": {
+        "summary": "Reload the current ROM from disk",
+        "operationId": "reload",
+        "description": "Reloads the currently loaded cartridge file from disk, resetting all emulator state. Useful after modifying the ROM file externally.",
+        "responses": {
+          "200": { "description": "Reloaded",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "accepted": { "type": "boolean" },
+                         "name": { "type": "string" }
+                       }}
+                   }}},
+          "409": { "description": "No ROM currently loaded." }
+        }
+      }
+    },
+
+    "/power-cycle": {
+      "post": {
+        "summary": "Power cycle the SNES",
+        "operationId": "powerCycle",
+        "description": "Performs a hard reset (power off then power on). Equivalent to flipping the physical power switch. Requires a loaded cartridge.",
+        "responses": {
+          "200": { "description": "Power cycled",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": { "accepted": { "type": "boolean" } } }
+                   }}},
+          "409": { "description": "No cartridge is loaded." }
+        }
+      }
+    },
+
+    "/cartridge/load": {
+      "post": {
+        "summary": "Load a cartridge from a filesystem path",
+        "operationId": "loadCartridge",
+        "description": "Loads a ROM file by absolute filesystem path. Unloads any currently loaded cartridge first, saving its SRAM. Supports .sfc files. Applies BPS/UPS/IPS patches automatically if present alongside the ROM.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["path"],
+              "properties": {
+                "path": { "type": "string",
+                          "description": "Absolute filesystem path to the ROM file.",
+                          "example": "/home/user/roms/secret_of_mana.sfc" }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "Cartridge loaded",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "loaded": { "type": "boolean" },
+                         "name":   { "type": "string",
+                                     "description": "Game title decoded from the ROM header." },
+                         "path":   { "type": "string" }
+                       }}
+                   }}},
+          "400": { "description": "Missing or invalid request body." },
+          "422": { "description": "File not found or not a valid ROM." }
+        }
+      }
     },
 
     "/cpu/registers": {

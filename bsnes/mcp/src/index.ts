@@ -154,6 +154,57 @@ server.tool(
   })
 );
 
+// System control
+
+server.tool(
+  "bsnes_reset",
+  "Send a soft reset to the SNES. The emulator continues running after " +
+  "reset — call bsnes_break afterward to pause at the reset vector. " +
+  "Requires a loaded cartridge with power on.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("POST", "/reset"), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_reload",
+  "Reload the currently loaded ROM from disk, resetting all emulator state. " +
+  "Useful after the ROM file has been modified externally (e.g. after a new " +
+  "assembly build).",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("POST", "/reload"), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_power_cycle",
+  "Hard reset the SNES (power off then power on). Clears all CPU and PPU " +
+  "state. More thorough than bsnes_reset.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("POST", "/power-cycle"), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_load_cartridge",
+  "Load a ROM file by absolute filesystem path. Unloads any currently loaded " +
+  "game first (saving SRAM). Applies BPS/UPS/IPS patches automatically if " +
+  "present alongside the ROM file.",
+  {
+    path: z.string()
+      .describe("Absolute filesystem path to the ROM file, e.g. '/home/user/roms/som.sfc'"),
+  },
+  async ({ path }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(await api("POST", "/cartridge/load", { path }), null, 2)
+    }]
+  })
+);
+
 // CPU registers and disassembly
 
 server.tool(

@@ -283,6 +283,35 @@ server.tool(
   })
 );
 
+server.tool(
+  "bsnes_get_wram_provenance",
+  "Look up the ROM source address for each byte in a WRAM range. " +
+  "Returns a 'provenance' array where each entry is either a 6-digit hex " +
+  "ROM address (where the byte was originally copied from) or null (byte " +
+  "has no ROM origin — written by game code or never set). " +
+  "Use this whenever the CPU is executing from WRAM: call this with the " +
+  "current PC area to find the corresponding ROM addresses, then use " +
+  "diz_get_byte_by_snes_address on those ROM addresses to annotate the " +
+  "correct location in Diz. Provenance chains (WRAM-to-WRAM copies) are " +
+  "resolved automatically to the ultimate ROM origin. " +
+  "Requires the emulator to be paused.",
+  {
+    addr: z.string()
+      .describe("Start WRAM address in hex, e.g. '7E8000'"),
+    count: z.number().int().min(1).max(4096).default(64)
+      .describe("Number of bytes to query (default 64, max 4096)"),
+  },
+  async ({ addr, count }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(
+        await api("GET", `/wram/provenance?addr=${addr}&count=${count}`),
+        null, 2
+      )
+    }]
+  })
+);
+
 // Memory
 
 server.tool(

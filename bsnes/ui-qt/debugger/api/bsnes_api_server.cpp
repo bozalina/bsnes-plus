@@ -703,6 +703,62 @@ void BsnesApiServer::setupRoutes() {
         sendJson(res, result);
     });
 
+    // ── GET /wram/provenance?addr=7E8000&count=256 ───────────────────────────
+    _svr->Get("/wram/provenance", [this](const httplib::Request& req,
+                                          httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        if (!req.has_param("addr")) {
+            sendError(res, 400, "MISSING_PARAM", "'addr' is required.");
+            return;
+        }
+
+        uint32_t addr;
+        int count = 256;
+        try {
+            addr  = (uint32_t)std::stoul(req.get_param_value("addr"),
+                                         nullptr, 16);
+            if (req.has_param("count"))
+                count = std::stoi(req.get_param_value("count"));
+        } catch (...) {
+            sendError(res, 400, "INVALID_PARAM", "Cannot parse addr or count.");
+            return;
+        }
+
+        if (wramOffset(addr) < 0) {
+            sendError(res, 400, "NOT_WRAM",
+                      "Address " + hexStr(addr, 6) +
+                      " is not a WRAM address. Provide a $7Exxxx/$7Fxxxx address.");
+            return;
+        }
+
+        count = std::max(1, std::min(count, 4096));
+
+        json result;
+        dispatch([this, &result, addr, count]() {
+            json provenance = json::array();
+            for (int i = 0; i < count; i++) {
+                uint32_t wramAddr = addr + i;
+                int32_t  woff     = wramOffset(wramAddr);
+                if (woff < 0 || woff >= (int32_t)WRAM_SIZE) {
+                    provenance.push_back(nullptr);
+                    continue;
+                }
+                uint32_t src = SNES::cpu.wramShadow[woff];
+                if (src == SHADOW_SENTINEL)
+                    provenance.push_back(nullptr);
+                else
+                    provenance.push_back(hexStr(src, 6));
+            }
+            result = {
+                {"addr",       hexStr(addr, 6)},
+                {"count",      count},
+                {"provenance", provenance}
+            };
+        }, true);
+
+        sendJson(res, result);
+    });
+
     // ── GET /memory/{source}?addr=7E0000&count=16 ────────────────────────────
     _svr->Get("/memory/:source", [this](const httplib::Request& req, httplib::Response& res) {
         if (!requirePaused(res)) return;
@@ -1387,6 +1443,48 @@ void BsnesApiServer::setupRoutes() {
                      "schema": { "type": "array",
                                  "items": { "$ref": "#/components/schemas/UsageFlagEntry" } }
                    }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/wram/provenance": {
+      "get": {
+        "summary": "WRAM byte provenance (ROM source addresses)",
+        "operationId": "getWramProvenance",
+        "description": "For each byte in a WRAM address range, returns the 24-bit ROM address it was originally copied from, or null if the byte has no ROM origin (written by game code, zeroed, or never written). Provenance chains (WRAM-to-WRAM copies) are resolved to their ultimate ROM source. Use this to find the correct ROM address to annotate in Diz when stepping through code executing from WRAM. Requires the emulator to be paused.",
+        "parameters": [
+          { "name": "addr", "in": "query", "required": true,
+            "schema": { "type": "string" }, "example": "7E8000",
+            "description": "Start WRAM address in hex. Must be in WRAM ($7Exxxx, $7Fxxxx, or low mirror $00-$1FFF)." },
+          { "name": "count", "in": "query", "required": false,
+            "schema": { "type": "integer", "default": 256, "maximum": 4096 },
+            "description": "Number of bytes to query (default 256, max 4096)." }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provenance data",
+            "content": { "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "addr":  { "type": "string", "example": "7E8000" },
+                  "count": { "type": "integer" },
+                  "provenance": {
+                    "type": "array",
+                    "description": "One entry per requested byte. String = 6-digit hex ROM source address. null = no ROM origin.",
+                    "items": {
+                      "oneOf": [
+                        { "type": "string", "example": "C78000" },
+                        { "type": "null" }
+                      ]
+                    }
+                  }
+                }
+              }
+            }}
+          },
+          "400": { "description": "Address is not in WRAM, or invalid parameters." },
           "409": { "$ref": "#/components/responses/NotPaused" }
         }
       }

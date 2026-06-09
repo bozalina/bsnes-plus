@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { spawn } from "child_process";
 
 const BASE_URL = process.env.BSNES_API_URL ?? "http://127.0.0.1:5744";
 
@@ -38,6 +39,54 @@ const server = new McpServer({
   name: "bsnes-mcp",
   version: "1.0.0",
 });
+
+async function isBsnesRunning(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE_URL}/status`,
+      { signal: AbortSignal.timeout(1000) });
+    return res.status !== 0;
+  } catch {
+    return false;
+  }
+}
+
+server.tool(
+  "start_bsnes",
+  "Launch bsnes-plus if it is not already running. " +
+  "Waits up to 15 seconds for the debug server to become reachable. " +
+  "Requires the BSNES_PATH environment variable to be set to the path " +
+  "of the bsnes-plus executable. Launches with --show-debugger so the " +
+  "debugger window is visible immediately.",
+  {},
+  async () => {
+    if (await isBsnesRunning())
+      return { content: [{ type: "text",
+        text: "bsnes-plus is already running." }] };
+
+    const bsnesPath = process.env.BSNES_PATH;
+    if (!bsnesPath)
+      throw new Error(
+        "BSNES_PATH environment variable is not set. " +
+        "Set it to the path of the bsnes-plus executable."
+      );
+
+    spawn(bsnesPath, ["--show-debugger"], { detached: true, stdio: "ignore" })
+      .unref();
+
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      if (await isBsnesRunning())
+        return { content: [{ type: "text",
+          text: "bsnes-plus launched and debug server is reachable." }] };
+    }
+
+    throw new Error(
+      "bsnes-plus was launched but the debug server did not become " +
+      "reachable within 15 seconds. Check that the executable path is " +
+      "correct and that this is a debugger build."
+    );
+  }
+);
 
 // Status and execution control
 

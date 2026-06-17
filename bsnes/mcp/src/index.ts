@@ -388,6 +388,33 @@ server.tool(
 );
 
 server.tool(
+  "bsnes_dump_memory",
+  "Dump a range of memory directly to a binary file on the machine running " +
+  "bsnes. Use this instead of bsnes_read_memory for large regions (more than " +
+  "a few hundred bytes) — it writes raw bytes to disk with no size cap and " +
+  "no data passing through the conversation. Requires the emulator to be " +
+  "paused. The file is written on the bsnes host; provide an absolute path.",
+  {
+    source: z.enum(["cpu","apu","apuram","dsp","vram","oam","cgram","cartrom","cartram"])
+      .describe("Memory bus to read from (use 'cpu' for WRAM/ROM/registers)"),
+    addr: z.string()
+      .describe("Start address as a hex string, e.g. '7E8000'"),
+    count: z.number().int().min(1).max(0x1000000)
+      .describe("Number of bytes to dump"),
+    path: z.string()
+      .describe("Absolute file path on the bsnes host to write the raw bytes to"),
+  },
+  async ({ source, addr, count, path }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(
+        await api("POST", `/memory/${source}/dump`, { addr, count, path }),
+        null, 2)
+    }]
+  })
+);
+
+server.tool(
   "bsnes_write_memory",
   "Write bytes to a SNES memory bus. Limited to 4096 bytes per call. " +
   "Requires the emulator to be paused. Use with care — writes are live " +

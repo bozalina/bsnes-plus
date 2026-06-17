@@ -49,6 +49,10 @@ private:
     json readMemory(const std::string& source, uint32_t addr, int count);
     void writeMemory(const std::string& source, uint32_t addr,
                      const std::vector<uint8_t>& data);
+    // Returns bytes written, -1 on file-open failure, -2 on bad source.
+    // Must be called from the Qt main thread.
+    long dumpMemoryToFile(const std::string& source, uint32_t addr,
+                          uint32_t count, const std::string& path);
 
     // ── Source name → MemorySource enum ─────────────────────────────────
     // Returns false if name is invalid (leaves 'out' untouched).

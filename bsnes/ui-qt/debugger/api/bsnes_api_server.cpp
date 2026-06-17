@@ -303,6 +303,37 @@ void BsnesApiServer::writeMemory(const std::string& source,
     }
 }
 
+// ── dumpMemoryToFile ──────────────────────────────────────────────────────────
+// Writes 'count' bytes from memory bus 'source' starting at 'addr' into the
+// file at 'path' as raw binary. No 4096-byte cap — this is the whole point.
+// Returns bytes written, -1 on file-open failure, -2 on unknown source.
+// Must be called from the Qt main thread.
+
+long BsnesApiServer::dumpMemoryToFile(const std::string& source,
+                                       uint32_t addr, uint32_t count,
+                                       const std::string& path) {
+    SNES::Debugger::MemorySource src;
+    if (!parseSource(source, src)) return -2;
+
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return -1;
+
+    const uint32_t CHUNK = 8192;
+    std::vector<uint8_t> buf;
+    buf.reserve(CHUNK);
+    uint32_t written = 0;
+    while (written < count) {
+        uint32_t n = std::min(CHUNK, count - written);
+        buf.clear();
+        for (uint32_t i = 0; i < n; ++i)
+            buf.push_back((uint8_t)SNES::debugger.read(src, addr + written + i));
+        fwrite(buf.data(), 1, n, f);
+        written += n;
+    }
+    fclose(f);
+    return (long)written;
+}
+
 // ── sendJson / sendError ──────────────────────────────────────────────────────
 
 void BsnesApiServer::sendJson(httplib::Response& res,
@@ -824,6 +855,63 @@ void BsnesApiServer::setupRoutes() {
             writeMemory(srcName, addr, data);
         }, true);
         sendJson(res, {{"written", (int)data.size()}, {"addr", hexStr(addr, 6)}});
+    });
+
+    // ── POST /memory/{source}/dump  body: {"addr":"7E8000","count":22227,"path":"/tmp/out.bin"} ──
+    _svr->Post("/memory/:source/dump", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        std::string srcName = req.path_params.at("source");
+        SNES::Debugger::MemorySource src;
+        if (!parseSource(srcName, src)) {
+            sendError(res, 400, "INVALID_SOURCE", "Unknown memory source: " + srcName);
+            return;
+        }
+
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return; }
+
+        if (!body.contains("addr") || !body.contains("count") || !body.contains("path")) {
+            sendError(res, 400, "MISSING_PARAM", "'addr', 'count', and 'path' are required.");
+            return;
+        }
+
+        uint32_t addr, count;
+        std::string path;
+        try {
+            addr  = (uint32_t)std::stoul(body["addr"].get<std::string>(), nullptr, 16);
+            count = body["count"].get<uint32_t>();
+            path  = body["path"].get<std::string>();
+        } catch (...) {
+            sendError(res, 400, "INVALID_PARAM",
+                      "addr must be a hex string, count must be an integer, path must be a string.");
+            return;
+        }
+        if (count == 0 || count > 0x1000000) {
+            sendError(res, 400, "INVALID_PARAM", "count must be between 1 and 16777216.");
+            return;
+        }
+
+        long result = 0;
+        dispatch([this, &result, srcName, addr, count, path]() {
+            result = dumpMemoryToFile(srcName, addr, count, path);
+        }, true);
+
+        if (result == -1) {
+            sendError(res, 500, "FILE_ERROR", "Could not open file for writing: " + path);
+            return;
+        }
+        if (result == -2) {
+            sendError(res, 400, "BAD_SOURCE", "Unknown memory source.");
+            return;
+        }
+        sendJson(res, {
+            {"source",  srcName},
+            {"addr",    hexStr(addr, 6)},
+            {"count",   (int)count},
+            {"path",    path},
+            {"written", (int)result}
+        });
     });
 
     // ── GET /breakpoints ─────────────────────────────────────────────────────
@@ -1545,6 +1633,47 @@ void BsnesApiServer::setupRoutes() {
                        }}
                    }}},
           "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/memory/{source}/dump": {
+      "post": {
+        "summary": "Dump memory to a binary file",
+        "operationId": "dumpMemory",
+        "description": "Writes a raw binary file containing the requested memory range on the machine running bsnes. Unlike GET /memory/{source}, there is no 4096-byte cap — use this for large regions (kilobytes or more). The file is written to the bsnes host filesystem; provide an absolute path. Requires paused state.",
+        "parameters": [
+          { "name": "source", "in": "path", "required": true,
+            "schema": { "type": "string",
+                        "enum": ["cpu","apu","apuram","dsp","vram","oam","cgram","cartrom","cartram"] } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["addr", "count", "path"],
+              "properties": {
+                "addr":  { "type": "string", "description": "Start address as a hex string.", "example": "7E8000" },
+                "count": { "type": "integer", "description": "Number of bytes to dump (1–16777216).", "minimum": 1, "maximum": 16777216 },
+                "path":  { "type": "string", "description": "Absolute file path on the bsnes host to write raw bytes to.", "example": "/tmp/wram_dump.bin" }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "File written successfully",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "source":  { "type": "string" },
+                         "addr":    { "type": "string" },
+                         "count":   { "type": "integer" },
+                         "path":    { "type": "string" },
+                         "written": { "type": "integer", "description": "Actual bytes written." }
+                       }}
+                   }}},
+          "400": { "description": "Missing or invalid parameters, or unknown source." },
+          "409": { "$ref": "#/components/responses/NotPaused" },
+          "500": { "description": "Could not open the destination file for writing." }
         }
       }
     },

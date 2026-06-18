@@ -61,7 +61,7 @@ Or to run without building first:
 | `bsnes_step_to_irq` | Run to next IRQ |
 | `bsnes_get_registers` | Read all CPU registers and flags |
 | `bsnes_set_registers` | Write registers and/or flags |
-| `bsnes_disassemble` | Disassemble at a SNES address |
+| `bsnes_disassemble_current` | Disassemble the current instruction |
 | `bsnes_get_usage` | Per-byte execution history |
 | `bsnes_read_memory` | Read from a memory bus |
 | `bsnes_write_memory` | Write to a memory bus |

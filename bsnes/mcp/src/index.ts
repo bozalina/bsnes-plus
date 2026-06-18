@@ -290,21 +290,18 @@ server.tool(
 );
 
 server.tool(
-  "bsnes_disassemble",
-  "Disassemble instructions at a SNES address. The address must have been " +
-  "executed at least once — returns an error for untraced addresses. " +
-  "Results may be truncated if the walk hits untraced code; check the " +
-  "'truncated' field. Requires the emulator to be paused.",
-  {
-    addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2'"),
-    lines: z.number().int().min(1).max(256).default(10)
-      .describe("Number of instructions to return (default 10, max 256)"),
-  },
-  async ({ addr, lines }) => ({
+  "bsnes_disassemble_current",
+  "Disassemble ONLY the current instruction (at the current PC), using the " +
+  "live M/X state at that PC. There is no look-ahead — to inspect the next " +
+  "instruction, step first, then call this again. Reading ahead and decoding " +
+  "future instructions statically is not supported because it is unreliable " +
+  "across M/X changes. Requires the emulator to be paused.",
+  {},
+  async () => ({
     content: [{
       type: "text",
       text: JSON.stringify(
-        await api("GET", `/cpu/disassemble?addr=${addr}&lines=${lines}`),
+        await api("GET", "/cpu/disassemble"),
         null, 2
       )
     }]

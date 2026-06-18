@@ -185,73 +185,6 @@ json BsnesApiServer::buildBreakResult() {
     return result;
 }
 
-// ── disassembleAt ─────────────────────────────────────────────────────────────
-// Returns a JSON object with disassembly results. The starting address must
-// have been executed (UsageOpcode set); returns a startError sentinel otherwise.
-// Must be called from the Qt main thread.
-
-json BsnesApiServer::disassembleAt(uint32_t addr, int lines) {
-    addr &= 0xFFFFFF;
-
-    if (!(SNES::cpu.usage[addr] & SNES::CPUDebugger::UsageOpcode)) {
-        return {
-            {"startError", true},
-            {"message",
-             "Address " + hexStr(addr, 6) +
-             " has not been executed; M/X state is unknown. "
-             "Run to this address first."}
-        };
-    }
-
-    json instructions = json::array();
-    bool truncated    = false;
-    uint32_t truncAt  = 0;
-
-    for (int i = 0; i < lines; ++i) {
-        addr &= 0xFFFFFF;
-
-        if (i > 0 && !(SNES::cpu.usage[addr] & SNES::CPUDebugger::UsageOpcode)) {
-            truncated = true;
-            truncAt   = addr;
-            break;
-        }
-
-        char buf[256];
-        SNES::cpu.disassemble_opcode(buf, addr, false);
-
-        int len = 1;
-        for (int k = 1; k <= 4; ++k) {
-            uint32_t next = (addr + k) & 0xFFFFFF;
-            if (SNES::cpu.usage[next] & SNES::CPUDebugger::UsageOpcode) {
-                len = k;
-                break;
-            }
-        }
-
-        json bytes = json::array();
-        for (int b = 0; b < len; ++b)
-            bytes.push_back((int)SNES::debugger.read(
-                SNES::Debugger::MemorySource::CPUBus, (addr + b) & 0xFFFFFF));
-
-        instructions.push_back({
-            {"addr",  hexStr(addr, 6)},
-            {"bytes", bytes},
-            {"text",  std::string(buf)},
-        });
-
-        addr = (addr + len) & 0xFFFFFF;
-    }
-
-    json result = {
-        {"startError",   false},
-        {"instructions", instructions},
-        {"truncated",    truncated},
-    };
-    if (truncated)
-        result["truncatedAt"] = hexStr(truncAt, 6);
-    return result;
-}
-
 // ── parseSource ───────────────────────────────────────────────────────────────
 
 bool BsnesApiServer::parseSource(const std::string& name,
@@ -666,34 +599,54 @@ void BsnesApiServer::setupRoutes() {
         sendJson(res, result);
     });
 
-    // ── GET /cpu/disassemble?addr=C08000&lines=10 ────────────────────────────
+    // ── GET /cpu/disassemble — CURRENT INSTRUCTION ONLY ──────────────────────
+    // Returns only the single instruction at the current PC, disassembled with
+    // the live M/X state at that PC. No look-ahead window: reading ahead and
+    // statically decoding future instructions is unreliable and not permitted.
+    // To see the next instruction, step and call this again.
     _svr->Get("/cpu/disassemble", [this](const httplib::Request& req, httplib::Response& res) {
         if (!requirePaused(res)) return;
-        if (!req.has_param("addr")) {
-            sendError(res, 400, "MISSING_PARAM", "'addr' is required."); return;
-        }
-        uint32_t addr;
-        int lines = 10;
-        try {
-            addr  = (uint32_t)std::stoul(req.get_param_value("addr"), nullptr, 16);
-            if (req.has_param("lines"))
-                lines = std::stoi(req.get_param_value("lines"));
-        } catch (...) {
-            sendError(res, 400, "INVALID_PARAM", "Cannot parse addr or lines."); return;
-        }
-        lines = std::max(1, std::min(lines, 256));
 
-        json result;
-        dispatch([this, &result, addr, lines]() {
-            result = disassembleAt(addr, lines);
-        }, true);
-
-        if (result.value("startError", false)) {
-            sendError(res, 422, "UNTRACED_ADDRESS",
-                      result.value("message", "Address has not been executed."));
+        // The look-ahead window was removed. Reject the old parameters loudly
+        // rather than silently ignoring them.
+        if (req.has_param("addr") || req.has_param("lines")) {
+            sendError(res, 400, "PARAMS_REMOVED",
+                      "/cpu/disassemble no longer accepts 'addr' or 'lines'. "
+                      "It returns only the instruction at the current PC. "
+                      "Step to the instruction you want, then call with no params.");
             return;
         }
-        result.erase("startError");
+
+        json result;
+        dispatch([this, &result]() {
+            uint32_t pc = SNES::cpu.opcode_pc & 0xFFFFFF;
+
+            char buf[256];
+            SNES::cpu.disassemble_opcode(buf, pc, false);
+
+            // Instruction length from the usage map (current PC is, by
+            // definition, an executed opcode).
+            int len = 1;
+            for (int k = 1; k <= 4; ++k) {
+                uint32_t next = (pc + k) & 0xFFFFFF;
+                if (SNES::cpu.usage[next] & SNES::CPUDebugger::UsageOpcode) {
+                    len = k;
+                    break;
+                }
+            }
+
+            json bytes = json::array();
+            for (int b = 0; b < len; ++b)
+                bytes.push_back((int)SNES::debugger.read(
+                    SNES::Debugger::MemorySource::CPUBus, (pc + b) & 0xFFFFFF));
+
+            result = {
+                {"addr",  hexStr(pc, 6)},
+                {"bytes", bytes},
+                {"text",  std::string(buf)},
+            };
+        }, true);
+
         sendJson(res, result);
     });
 
@@ -1133,19 +1086,6 @@ void BsnesApiServer::setupRoutes() {
         }
       },
 
-      "DisassemblyResult": {
-        "type": "object",
-        "properties": {
-          "instructions": { "type": "array",
-                            "items": { "$ref": "#/components/schemas/DisassemblyLine" } },
-          "truncated":    { "type": "boolean",
-                            "description": "True if the walk hit an untraced address before completing all requested lines." },
-          "truncatedAt":  { "type": "string",
-                            "description": "Address where truncation occurred. Present only when truncated is true.",
-                            "example": "C0A412" }
-        }
-      },
-
       "UsageFlagEntry": {
         "type": "object",
         "properties": {
@@ -1489,27 +1429,19 @@ void BsnesApiServer::setupRoutes() {
 
     "/cpu/disassemble": {
       "get": {
-        "summary": "Disassemble instructions at a SNES address",
+        "summary": "Disassemble the current instruction",
         "operationId": "disassemble",
-        "description": "Returns up to 'lines' disassembled instructions starting at 'addr'. The starting address must have been executed at least once (has UsageOpcode set). Returns 422 if the address is untraced. The walk stops early and sets truncated=true if it reaches an untraced address.",
-        "parameters": [
-          { "name": "addr", "in": "query", "required": true,
-            "schema": { "type": "string" }, "example": "C0A3F2",
-            "description": "SNES address in hex." },
-          { "name": "lines", "in": "query", "required": false,
-            "schema": { "type": "integer", "default": 10, "maximum": 256 },
-            "description": "Maximum number of instructions to return." }
-        ],
+        "description": "Returns the single instruction at the current program counter, disassembled with the live M/X state at that PC. There is no look-ahead window — to see the next instruction, step and call again. Takes no parameters; passing 'addr' or 'lines' returns 400.",
         "responses": {
-          "200": { "description": "Disassembly result",
+          "200": { "description": "The current instruction",
                    "content": { "application/json": {
-                     "schema": { "$ref": "#/components/schemas/DisassemblyResult" }
+                     "schema": { "$ref": "#/components/schemas/DisassemblyLine" }
                    }}},
-          "409": { "$ref": "#/components/responses/NotPaused" },
-          "422": { "description": "Address has not been executed. Run to it first.",
+          "400": { "description": "The removed 'addr' or 'lines' parameter was supplied.",
                    "content": { "application/json": {
                      "schema": { "$ref": "#/components/schemas/Error" }
-                   }}}
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
         }
       }
     },

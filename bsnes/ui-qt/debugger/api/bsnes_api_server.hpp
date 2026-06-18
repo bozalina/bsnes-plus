@@ -45,7 +45,6 @@ private:
     // ── State helpers (must be called from Qt main thread) ───────────────
     json getCpuStateJson();
     json buildBreakResult();
-    json disassembleAt(uint32_t addr, int lines);
     json readMemory(const std::string& source, uint32_t addr, int count);
     void writeMemory(const std::string& source, uint32_t addr,
                      const std::vector<uint8_t>& data);

@@ -2,9 +2,10 @@
 #include "disassembler/disassemblerview.cpp"
 #include "debuggerview.moc"
 
-DebuggerView::DebuggerView(RegisterEdit *registers, DisasmProcessor *processor, bool step) : registers(registers), processor(processor) {
+DebuggerView::DebuggerView(RegisterEdit *registers, DisasmProcessor *processor, bool step, bool enableWramTraceback) : registers(registers), processor(processor) {
   addressOffset = 0;
   cursorPosition = 0;
+  wramTraceback = nullptr;
 
   layout = new QHBoxLayout;
   layout->setMargin(Style::WindowMargin);
@@ -56,6 +57,11 @@ DebuggerView::DebuggerView(RegisterEdit *registers, DisasmProcessor *processor, 
   traceProcessor = new QCheckBox("Trace");
   controlLayout->addWidget(traceProcessor);
 
+  if (enableWramTraceback) {
+    wramTraceback = new QCheckBox("WRAM Traceback");
+    controlLayout->addWidget(wramTraceback);
+  }
+
   if (processor->getSymbols() != NULL) {
     symbolsViewerDialog = new SymbolsView(processor);
     symbolsViewer = new QPushButton("Symbols");
@@ -67,6 +73,9 @@ DebuggerView::DebuggerView(RegisterEdit *registers, DisasmProcessor *processor, 
 
   connect(stepProcessor, SIGNAL(clicked(bool)), this, SLOT(synchronize()));
   connect(traceProcessor, SIGNAL(stateChanged(int)), this, SIGNAL(traceStateChanged(int)));
+  if (wramTraceback) {
+    connect(wramTraceback, SIGNAL(stateChanged(int)), this, SIGNAL(wramTracebackStateChanged(int)));
+  }
 
   connect(consoleLayout, SIGNAL(splitterMoved(int,int)), this, SLOT(synchronize()));
 

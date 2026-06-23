@@ -867,6 +867,47 @@ void BsnesApiServer::setupRoutes() {
         });
     });
 
+    // ── POST /screen/dump  body: {"path":"/tmp/screen.png"} ──────────────────
+    // Writes the most recently rendered frame as a PNG. Does not require paused
+    // state — a dump while running captures the last rendered frame.
+    _svr->Post("/screen/dump", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requireLoaded(res)) return;
+
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return; }
+
+        if (!body.contains("path")) {
+            sendError(res, 400, "MISSING_PARAM", "'path' is required.");
+            return;
+        }
+        std::string path = body["path"].get<std::string>();
+
+        bool ok = false;
+        bool hadFrame = false;
+        int w = 0, h = 0;
+        dispatch([&]() {
+            hadFrame = !interface.lastFrame.isNull();
+            if (hadFrame) {
+                w = interface.lastFrame.width();
+                h = interface.lastFrame.height();
+                ok = interface.saveScreenToFile(path.c_str());
+            }
+        }, true);
+
+        if (!hadFrame) {
+            sendError(res, 409, "NO_FRAME",
+                      "No frame has been rendered yet. Run the emulator briefly, "
+                      "then pause and retry.");
+            return;
+        }
+        if (!ok) {
+            sendError(res, 500, "FILE_ERROR", "Could not write PNG to: " + path);
+            return;
+        }
+        sendJson(res, { {"path", path}, {"width", w}, {"height", h} });
+    });
+
     // ── GET /breakpoints ─────────────────────────────────────────────────────
     _svr->Get("/breakpoints", [this](const httplib::Request&, httplib::Response& res) {
         json result;
@@ -1606,6 +1647,38 @@ void BsnesApiServer::setupRoutes() {
           "400": { "description": "Missing or invalid parameters, or unknown source." },
           "409": { "$ref": "#/components/responses/NotPaused" },
           "500": { "description": "Could not open the destination file for writing." }
+        }
+      }
+    },
+
+    "/screen/dump": {
+      "post": {
+        "summary": "Dump the rendered screen to a PNG file",
+        "operationId": "dumpScreen",
+        "description": "Writes the most recently rendered frame to a PNG file on the machine running bsnes, so a client can SEE the screen instead of inferring game state from registers and memory. The image is the native-resolution rendered screen (typically 256x224, no upscaling filter). Does not require paused state — a dump while running captures the last rendered frame. Requires a cartridge loaded and at least one frame rendered.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["path"],
+              "properties": {
+                "path": { "type": "string", "description": "Absolute file path on the bsnes host to write the PNG to.", "example": "/render/screen.png" }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "PNG written successfully",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "path":   { "type": "string" },
+                         "width":  { "type": "integer", "description": "Image width in pixels." },
+                         "height": { "type": "integer", "description": "Image height in pixels." }
+                       }}
+                   }}},
+          "400": { "description": "Missing or invalid 'path', or malformed JSON body." },
+          "409": { "description": "No frame has been rendered yet. Run the emulator briefly, then retry." },
+          "500": { "description": "Could not write the PNG to the destination path." }
         }
       }
     },

@@ -45,6 +45,12 @@ void Interface::video_refresh(const uint16_t *data, unsigned width, unsigned hei
     video.unlock();
     video.refresh();
 
+    // Cache a detached copy of the current frame for on-demand (paused) dumps.
+    // The QImage constructed over 'output' does not own its pixels (the video
+    // buffer reuses them next frame), so .copy() to detach.
+    lastFrame = QImage((const unsigned char*)output, outwidth, outheight,
+                       outpitch, QImage::Format_RGB32).copy();
+
     if(saveScreenshot == true && config().video.unfilteredScreenshot == false) {
       captureScreenshot(QImage((const unsigned char*)output, outwidth, outheight, outpitch, QImage::Format_RGB32));
     }
@@ -100,6 +106,11 @@ void Interface::captureScreenshot(const QImage& image) {
 
   image.save(filepath(filename, config().path.data));
   utility.showMessage("Screenshot saved.");
+}
+
+bool Interface::saveScreenToFile(const string& path) {
+  if(lastFrame.isNull()) return false;
+  return lastFrame.save(QString::fromUtf8(path), "PNG");
 }
 
 void Interface::captureSPC() {

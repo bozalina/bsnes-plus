@@ -412,6 +412,26 @@ server.tool(
 );
 
 server.tool(
+  "bsnes_dump_screen",
+  "Write the most recently rendered screen to a PNG file on the bsnes host, " +
+  "so you can SEE what is on screen instead of inferring the game's state from " +
+  "registers and memory. Use this when you need to know what phase the game is " +
+  "in (title, menu, loading, gameplay, a specific screen). Works while paused — " +
+  "it captures the last rendered frame. After dumping, read the PNG to view it. " +
+  "Provide an absolute host path, conventionally under /render or /tmp.",
+  {
+    path: z.string()
+      .describe("Absolute host path for the PNG, e.g. '/render/screen.png'"),
+  },
+  async ({ path }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(await api("POST", "/screen/dump", { path }), null, 2)
+    }]
+  })
+);
+
+server.tool(
   "bsnes_write_memory",
   "Write bytes to a SNES memory bus. Limited to 4096 bytes per call. " +
   "Requires the emulator to be paused. Use with care — writes are live " +

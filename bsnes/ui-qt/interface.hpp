@@ -10,9 +10,13 @@ public:
   Interface();
   void captureScreenshot(const QImage&);
   void captureSPC();
+  // Writes the most recent rendered frame as PNG to an explicit path.
+  // Returns true on success, false if no frame has been rendered yet.
+  bool saveScreenToFile(const string& path);
   bool saveScreenshot;
   bool framesUpdated;
   unsigned framesExecuted;
+  QImage lastFrame;   // most recent rendered frame, kept for paused screen dumps
 };
 
 extern Interface interface;

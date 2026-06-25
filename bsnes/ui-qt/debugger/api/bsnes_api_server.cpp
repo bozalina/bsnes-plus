@@ -908,6 +908,131 @@ void BsnesApiServer::setupRoutes() {
         sendJson(res, { {"path", path}, {"width", w}, {"height", h} });
     });
 
+    // ── POST /input/press ────────────────────────────────────────────────────
+    // Holds buttons on controller port 1 for `frames` frames while running the
+    // emulator so the game actually polls the held input, then releases.
+    _svr->Post("/input/press", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requireLoaded(res)) return;
+
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return; }
+
+        if (!body.contains("buttons") || !body["buttons"].is_array()
+                || body["buttons"].empty()) {
+            sendError(res, 400, "MISSING_PARAM",
+                      "'buttons' (non-empty array of names) is required.");
+            return;
+        }
+        int frames = body.value("frames", 4);
+        if (frames < 1 || frames > 600) {
+            sendError(res, 400, "INVALID_PARAM", "'frames' must be 1..600.");
+            return;
+        }
+
+        static const std::map<std::string,int> BTN = {
+            {"B",0},{"Y",1},{"Select",2},{"Start",3},
+            {"Up",4},{"Down",5},{"Left",6},{"Right",7},
+            {"A",8},{"X",9},{"L",10},{"R",11}
+        };
+        uint16_t mask = 0;
+        for (auto& b : body["buttons"]) {
+            if (!b.is_string()) {
+                sendError(res, 400, "BAD_BUTTON", "Button names must be strings.");
+                return;
+            }
+            auto it = BTN.find(b.get<std::string>());
+            if (it == BTN.end()) {
+                sendError(res, 400, "BAD_BUTTON",
+                          "Unknown button: " + b.get<std::string>() +
+                          ". Valid: B Y Select Start Up Down Left Right A X L R");
+                return;
+            }
+            mask |= (1u << it->second);
+        }
+        if (((mask>>4&1) && (mask>>5&1)) || ((mask>>6&1) && (mask>>7&1))) {
+            sendError(res, 400, "OPPOSING_DIRS",
+                      "Cannot hold Up+Down or Left+Right simultaneously.");
+            return;
+        }
+
+        dispatch([mask]() { interface.setInputOverride(mask); }, /*blocking=*/true);
+
+        bool timedOut = false;
+        for (int i = 0; i < frames; ++i) {
+            auto result = doStep(SNES::Debugger::StepType::StepToVBlank,
+                                 false, std::chrono::seconds(5));
+            if (result.contains("code")) {
+                timedOut = true;
+                break;
+            }
+        }
+
+        dispatch([]() { interface.clearInputOverride(); }, /*blocking=*/true);
+
+        if (timedOut) {
+            sendError(res, 408, "FRAME_TIMEOUT",
+                      "Timed out waiting for a frame boundary. "
+                      "The emulator may be stuck or in an infinite loop.");
+            return;
+        }
+        sendJson(res, { {"held", body["buttons"]}, {"frames", frames} });
+    });
+
+    // ── POST /input/hold ─────────────────────────────────────────────────────
+    // Sets the input override without advancing frames. The override stays
+    // active until POST /input/release. Use /input/press for the common case.
+    _svr->Post("/input/hold", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requireLoaded(res)) return;
+
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return; }
+
+        if (!body.contains("buttons") || !body["buttons"].is_array()
+                || body["buttons"].empty()) {
+            sendError(res, 400, "MISSING_PARAM",
+                      "'buttons' (non-empty array of names) is required.");
+            return;
+        }
+
+        static const std::map<std::string,int> BTN = {
+            {"B",0},{"Y",1},{"Select",2},{"Start",3},
+            {"Up",4},{"Down",5},{"Left",6},{"Right",7},
+            {"A",8},{"X",9},{"L",10},{"R",11}
+        };
+        uint16_t mask = 0;
+        for (auto& b : body["buttons"]) {
+            if (!b.is_string()) {
+                sendError(res, 400, "BAD_BUTTON", "Button names must be strings.");
+                return;
+            }
+            auto it = BTN.find(b.get<std::string>());
+            if (it == BTN.end()) {
+                sendError(res, 400, "BAD_BUTTON",
+                          "Unknown button: " + b.get<std::string>());
+                return;
+            }
+            mask |= (1u << it->second);
+        }
+        if (((mask>>4&1) && (mask>>5&1)) || ((mask>>6&1) && (mask>>7&1))) {
+            sendError(res, 400, "OPPOSING_DIRS",
+                      "Cannot hold Up+Down or Left+Right simultaneously.");
+            return;
+        }
+
+        dispatch([mask]() { interface.setInputOverride(mask); }, /*blocking=*/true);
+        sendJson(res, { {"holding", body["buttons"]} });
+    });
+
+    // ── POST /input/release ──────────────────────────────────────────────────
+    // Clears the input override set by /input/hold.
+    _svr->Post("/input/release", [this](const httplib::Request&, httplib::Response& res) {
+        if (!requireLoaded(res)) return;
+        dispatch([]() { interface.clearInputOverride(); }, /*blocking=*/true);
+        sendJson(res, { {"released", true} });
+    });
+
     // ── GET /breakpoints ─────────────────────────────────────────────────────
     _svr->Get("/breakpoints", [this](const httplib::Request&, httplib::Response& res) {
         json result;
@@ -1679,6 +1804,91 @@ void BsnesApiServer::setupRoutes() {
           "400": { "description": "Missing or invalid 'path', or malformed JSON body." },
           "409": { "description": "No frame has been rendered yet. Run the emulator briefly, then retry." },
           "500": { "description": "Could not write the PNG to the destination path." }
+        }
+      }
+    },
+
+    "/input/press": {
+      "post": {
+        "summary": "Hold buttons and run N frames",
+        "operationId": "inputPress",
+        "description": "Holds the specified buttons on controller port 1 while running the emulator for 'frames' frames, then releases them. The emulator must execute during those frames so the game polls the held input — a button held while paused does nothing. After the call the emulator is paused. Use this to drive the game: press Start to leave the title screen, navigate menus, or enter gameplay to reach code that only runs in those states.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["buttons"],
+              "properties": {
+                "buttons": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string",
+                             "enum": ["B","Y","Select","Start","Up","Down","Left","Right","A","X","L","R"] },
+                  "description": "Buttons to hold simultaneously. Cannot combine Up+Down or Left+Right.",
+                  "example": ["Start"]
+                },
+                "frames": {
+                  "type": "integer", "minimum": 1, "maximum": 600, "default": 4,
+                  "description": "Frames to run while holding (default 4 ≈ 1/15 s; 60 ≈ 1 s)."
+                }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "Buttons held and frames advanced",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "held":   { "type": "array", "items": { "type": "string" } },
+                         "frames": { "type": "integer" }
+                       }}
+                   }}},
+          "400": { "description": "Unknown button, opposing directions, or bad frame count." },
+          "408": { "description": "Timed out waiting for a frame boundary." },
+          "503": { "$ref": "#/components/responses/NoCartridge" }
+        }
+      }
+    },
+
+    "/input/hold": {
+      "post": {
+        "summary": "Arm input override without advancing",
+        "operationId": "inputHold",
+        "description": "Sets the controller port 1 override to the given buttons and leaves it active. The game will read these buttons on every subsequent input poll until POST /input/release is called. Use POST /input/press for the common press-and-run pattern.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["buttons"],
+              "properties": {
+                "buttons": { "type": "array", "minItems": 1,
+                             "items": { "type": "string",
+                                        "enum": ["B","Y","Select","Start","Up","Down","Left","Right","A","X","L","R"] } }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "Override armed",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": { "holding": { "type": "array", "items": { "type": "string" } } } }
+                   }}},
+          "400": { "description": "Unknown button or opposing directions." }
+        }
+      }
+    },
+
+    "/input/release": {
+      "post": {
+        "summary": "Disarm input override",
+        "operationId": "inputRelease",
+        "description": "Clears the input override set by POST /input/hold. Physical input resumes immediately.",
+        "responses": {
+          "200": { "description": "Override cleared",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": { "released": { "type": "boolean" } } }
+                   }}}
         }
       }
     },

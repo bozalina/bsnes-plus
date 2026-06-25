@@ -412,6 +412,28 @@ server.tool(
 );
 
 server.tool(
+  "bsnes_press_buttons",
+  "Press and hold SNES controller buttons (port 1) for a number of frames, " +
+  "running the emulator for those frames so the game actually reads the input, " +
+  "then release. Use this to drive the game — e.g. press Start to leave the " +
+  "title screen, navigate menus, enter gameplay to reach code that only runs " +
+  "in those states. Buttons are held simultaneously for the whole duration. " +
+  "Valid: B Y Select Start Up Down Left Right A X L R. Cannot hold Up+Down or " +
+  "Left+Right together. Default 4 frames (~1/15s) — enough for one input poll; " +
+  "use more to hold longer (60 = ~1 second).",
+  {
+    buttons: z.array(z.enum(["B","Y","Select","Start","Up","Down","Left","Right","A","X","L","R"]))
+      .min(1).describe("Buttons to hold simultaneously, e.g. ['Start'] or ['A','Right']"),
+    frames: z.number().int().min(1).max(600).default(4)
+      .describe("Frames to hold while running (default 4; 60 = ~1 second)"),
+  },
+  async ({ buttons, frames }) => ({
+    content: [{ type: "text",
+      text: JSON.stringify(await api("POST", "/input/press", { buttons, frames }), null, 2) }]
+  })
+);
+
+server.tool(
   "bsnes_dump_screen",
   "Write the most recently rendered screen to a PNG file on the bsnes host, " +
   "so you can SEE what is on screen instead of inferring the game's state from " +

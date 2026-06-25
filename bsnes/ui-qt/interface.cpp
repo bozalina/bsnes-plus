@@ -82,7 +82,21 @@ void Interface::input_poll() {
 }
 
 int16_t Interface::input_poll(bool port, SNES::Input::Device device, unsigned index, unsigned id) {
+  if (inputOverrideActive && !port
+      && device == SNES::Input::Device::Joypad && id <= 11) {
+    return (inputOverrideButtons >> id) & 1;
+  }
   return mapper().status(port, device, index, id);
+}
+
+void Interface::setInputOverride(uint16_t buttons) {
+  inputOverrideButtons = buttons;
+  inputOverrideActive  = true;
+}
+
+void Interface::clearInputOverride() {
+  inputOverrideActive  = false;
+  inputOverrideButtons = 0;
 }
 
 void Interface::message(const string &text) {

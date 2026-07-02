@@ -420,7 +420,14 @@ server.tool(
   "in those states. Buttons are held simultaneously for the whole duration. " +
   "Valid: B Y Select Start Up Down Left Right A X L R. Cannot hold Up+Down or " +
   "Left+Right together. Default 4 frames (~1/15s) — enough for one input poll; " +
-  "use more to hold longer (60 = ~1 second).",
+  "use more to hold longer (60 = ~1 second). Stops early if a breakpoint fires " +
+  "during a frame (e.g. code that only runs once the input reaches the game): " +
+  "the response then has stopped:'breakpoint' with the break details " +
+  "(breakpointHit, opcodeAddr, disasm, cpu) and framesRun below the count you " +
+  "asked for, and the emulator is left paused at the breakpoint. Otherwise " +
+  "stopped:'completed' with framesRun equal to the count. The input is always " +
+  "released when this returns; to hold input across a breakpoint use " +
+  "bsnes_input_hold + bsnes_resume instead.",
   {
     buttons: z.array(z.enum(["B","Y","Select","Start","Up","Down","Left","Right","A","X","L","R"]))
       .min(1).describe("Buttons to hold simultaneously, e.g. ['Start'] or ['A','Right']"),
@@ -430,6 +437,40 @@ server.tool(
   async ({ buttons, frames }) => ({
     content: [{ type: "text",
       text: JSON.stringify(await api("POST", "/input/press", { buttons, frames }), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_input_hold",
+  "Arm a controller port 1 input override WITHOUT advancing any frames, and " +
+  "leave it held until bsnes_input_release. Unlike bsnes_press_buttons (which " +
+  "runs frames then releases), this sets the input and returns immediately with " +
+  "the emulator still paused — the override persists across resumes. Use it to " +
+  "catch a breakpoint that only fires once the game reads the input: " +
+  "bsnes_input_hold(buttons) -> bsnes_resume -> poll bsnes_get_status until " +
+  "paused:true -> inspect state -> bsnes_input_release. Buttons are held " +
+  "simultaneously. Valid: B Y Select Start Up Down Left Right A X L R. Cannot " +
+  "hold Up+Down or Left+Right together.",
+  {
+    buttons: z.array(z.enum(["B","Y","Select","Start","Up","Down","Left","Right","A","X","L","R"]))
+      .min(1).describe("Buttons to hold simultaneously, e.g. ['Start'] or ['A','Right']"),
+  },
+  async ({ buttons }) => ({
+    content: [{ type: "text",
+      text: JSON.stringify(await api("POST", "/input/hold", { buttons }), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_input_release",
+  "Clear the controller port 1 input override set by bsnes_input_hold; physical " +
+  "input resumes immediately. This is the release half of the break-aware hold " +
+  "workflow: bsnes_input_hold -> bsnes_resume -> poll bsnes_get_status until " +
+  "paused:true -> inspect -> bsnes_input_release. Does not advance frames.",
+  {},
+  async () => ({
+    content: [{ type: "text",
+      text: JSON.stringify(await api("POST", "/input/release"), null, 2) }]
   })
 );
 

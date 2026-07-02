@@ -958,7 +958,16 @@ void BsnesApiServer::setupRoutes() {
 
         dispatch([mask]() { interface.setInputOverride(mask); }, /*blocking=*/true);
 
-        bool timedOut = false;
+        // Advance one frame (StepToVBlank) at a time. A breakpoint can fire mid-frame
+        // — e.g. code that only runs once the held input reaches the game. The doStep
+        // result is a snapshot built (buildBreakResult) before break_event is reset at
+        // application.cpp, so its "breakEvent" reliably reports "BreakpointHit" here.
+        // On a breakpoint we stop early, leave the emulator paused there, and do not
+        // count that frame; on timeout we bail with 408.
+        bool timedOut      = false;
+        bool hitBreakpoint = false;
+        int  framesRun     = 0;
+        json breakResult;
         for (int i = 0; i < frames; ++i) {
             auto result = doStep(SNES::Debugger::StepType::StepToVBlank,
                                  false, std::chrono::seconds(5));
@@ -966,8 +975,16 @@ void BsnesApiServer::setupRoutes() {
                 timedOut = true;
                 break;
             }
+            if (result.value("breakEvent", std::string()) == "BreakpointHit") {
+                hitBreakpoint = true;
+                breakResult   = std::move(result);
+                break;   // do not re-arm — leave the emulator paused at the breakpoint
+            }
+            ++framesRun;   // vblank reached (CPUStep) = one frame completed
         }
 
+        // press_buttons keeps its "hold then release" contract: release on every exit,
+        // breakpoint included. Use /input/hold + /resume to hold input across a break.
         dispatch([]() { interface.clearInputOverride(); }, /*blocking=*/true);
 
         if (timedOut) {
@@ -976,7 +993,25 @@ void BsnesApiServer::setupRoutes() {
                       "The emulator may be stuck or in an infinite loop.");
             return;
         }
-        sendJson(res, { {"held", body["buttons"]}, {"frames", frames} });
+        if (hitBreakpoint) {
+            sendJson(res, {
+                {"held",            body["buttons"]},
+                {"framesRequested", frames},
+                {"framesRun",       framesRun},
+                {"stopped",         "breakpoint"},
+                {"breakpointHit",   breakResult["breakpointHit"]},
+                {"opcodeAddr",      breakResult["opcodeAddr"]},
+                {"disasm",          breakResult["disasm"]},
+                {"cpu",             breakResult["cpu"]},
+            });
+            return;
+        }
+        sendJson(res, {
+            {"held",            body["buttons"]},
+            {"framesRequested", frames},
+            {"framesRun",       framesRun},
+            {"stopped",         "completed"},
+        });
     });
 
     // ── POST /input/hold ─────────────────────────────────────────────────────
@@ -1812,7 +1847,7 @@ void BsnesApiServer::setupRoutes() {
       "post": {
         "summary": "Hold buttons and run N frames",
         "operationId": "inputPress",
-        "description": "Holds the specified buttons on controller port 1 while running the emulator for 'frames' frames, then releases them. The emulator must execute during those frames so the game polls the held input — a button held while paused does nothing. After the call the emulator is paused. Use this to drive the game: press Start to leave the title screen, navigate menus, or enter gameplay to reach code that only runs in those states.",
+        "description": "Holds the specified buttons on controller port 1 while running the emulator for 'frames' frames, then releases them. The emulator must execute during those frames so the game polls the held input — a button held while paused does nothing. Runs one frame at a time and stops early if a breakpoint fires during a frame (e.g. code that only runs once the held input reaches the game): the response then has stopped='breakpoint' with the break details and the emulator is left paused at the breakpoint (that frame is not counted). Otherwise stopped='completed'. The input override is always released on return; to hold input across a breakpoint use POST /input/hold + POST /resume. After the call the emulator is paused. Use this to drive the game: press Start to leave the title screen, navigate menus, or enter gameplay to reach code that only runs in those states.",
         "requestBody": {
           "required": true,
           "content": { "application/json": {
@@ -1835,12 +1870,18 @@ void BsnesApiServer::setupRoutes() {
           }}
         },
         "responses": {
-          "200": { "description": "Buttons held and frames advanced",
+          "200": { "description": "Frames advanced, or stopped early at a breakpoint",
                    "content": { "application/json": {
                      "schema": { "type": "object",
                        "properties": {
-                         "held":   { "type": "array", "items": { "type": "string" } },
-                         "frames": { "type": "integer" }
+                         "held":            { "type": "array", "items": { "type": "string" } },
+                         "framesRequested": { "type": "integer" },
+                         "framesRun":       { "type": "integer", "description": "Frames actually completed; < framesRequested if a breakpoint stopped it early." },
+                         "stopped":         { "type": "string", "enum": ["completed", "breakpoint"] },
+                         "breakpointHit":   { "type": "integer", "description": "Index of the breakpoint that fired (only when stopped='breakpoint')." },
+                         "opcodeAddr":      { "type": "string", "description": "PC at the breakpoint (only when stopped='breakpoint')." },
+                         "disasm":          { "type": "string", "description": "Disassembly at the breakpoint (only when stopped='breakpoint')." },
+                         "cpu":             { "type": "object", "description": "CPU registers/flags at the breakpoint (only when stopped='breakpoint')." }
                        }}
                    }}},
           "400": { "description": "Unknown button, opposing directions, or bad frame count." },

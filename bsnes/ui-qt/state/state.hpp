@@ -3,6 +3,7 @@ public:
   unsigned active;
   bool save(unsigned);
   bool load(unsigned);
+  bool loadFromPath(const char *path);
 
   void frame();
   void resetHistory();

@@ -53,6 +53,33 @@ bool State::load(unsigned slot) {
   return result;
 }
 
+bool State::loadFromPath(const char *path) {
+  if(!allowed()) {
+    utility.showMessage("Cannot load state.");
+    return false;
+  }
+
+  file fp;
+  bool result = false;
+  if(fp.open(path, file::mode::read)) {
+    unsigned size = fp.size();
+    uint8_t *data = new uint8_t[size];
+    fp.read(data, size);
+    fp.close();
+    serializer state(data, size);
+    delete[] data;
+    result = SNES::system.unserialize(state);
+  }
+
+  if(result) {
+    utility.showMessage(string() << "State loaded from " << path << ".");
+    resetHistory();
+  } else {
+    utility.showMessage(string() << "Failed to load state from " << path << ".");
+  }
+  return result;
+}
+
 void State::frame() {
   if(!allowed()) return;
   if(!config().system.rewindEnabled) return;

@@ -542,6 +542,80 @@ void BsnesApiServer::setupRoutes() {
         sendJson(res, {{"loaded", true}, {"name", loadedName}, {"path", path}});
     });
 
+    // ── POST /state/load ─────────────────────────────────────────────────────
+    _svr->Post("/state/load", [this](const httplib::Request& req,
+                                     httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) {
+            sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return;
+        }
+        if (!body.contains("slot") || !body["slot"].is_number_integer()) {
+            sendError(res, 400, "MISSING_PARAM", "'slot' (integer) is required."); return;
+        }
+        int slot = body["slot"].get<int>();
+        if (slot < 1) {
+            sendError(res, 400, "INVALID_SLOT",
+                      "'slot' must be >= 1 (matches the -N.bst filename suffix)."); return;
+        }
+
+        bool ready = false, ok = false;
+        dispatch([&]() {
+            if (!SNES::cartridge.loaded() || !application.power) return;
+            ready = true;
+            // State::load is 0-based; slot N loads <rom>-N.bst (State::name adds slot+1).
+            ok = state.load((unsigned)(slot - 1));
+        }, true);
+
+        if (!ready) {
+            sendError(res, 409, "NOT_READY",
+                      "Load state requires a loaded cartridge with power on.");
+            return;
+        }
+        if (!ok) {
+            sendError(res, 422, "LOAD_FAILED",
+                      "Failed to load state slot " + std::to_string(slot) +
+                      " (the -N.bst file may not exist, or save states are unsupported "
+                      "for this cartridge).");
+            return;
+        }
+        sendJson(res, {{"loaded", true}, {"slot", slot}});
+    });
+
+    // ── POST /state/load-file ────────────────────────────────────────────────
+    _svr->Post("/state/load-file", [this](const httplib::Request& req,
+                                          httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) {
+            sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return;
+        }
+        if (!body.contains("path") || !body["path"].is_string()) {
+            sendError(res, 400, "MISSING_PARAM", "'path' (string) is required."); return;
+        }
+        std::string path = body["path"].get<std::string>();
+
+        bool ready = false, ok = false;
+        dispatch([&]() {
+            if (!SNES::cartridge.loaded() || !application.power) return;
+            ready = true;
+            ok = state.loadFromPath(path.c_str());
+        }, true);
+
+        if (!ready) {
+            sendError(res, 409, "NOT_READY",
+                      "Load state requires a loaded cartridge with power on.");
+            return;
+        }
+        if (!ok) {
+            sendError(res, 422, "LOAD_FAILED",
+                      "Failed to load state from '" + path + "' (file may not exist, "
+                      "or is not a valid save state for the loaded cartridge).");
+            return;
+        }
+        sendJson(res, {{"loaded", true}, {"path", path}});
+    });
+
     // ── GET /cpu/registers ───────────────────────────────────────────────────
     _svr->Get("/cpu/registers", [this](const httplib::Request&, httplib::Response& res) {
         if (!requirePaused(res)) return;
@@ -1570,6 +1644,72 @@ void BsnesApiServer::setupRoutes() {
                    }}},
           "400": { "description": "Missing or invalid request body." },
           "422": { "description": "File not found or not a valid ROM." }
+        }
+      }
+    },
+
+    "/state/load": {
+      "post": {
+        "summary": "Load a quick-save state by slot",
+        "operationId": "loadState",
+        "description": "Loads a bsnes-plus quick-save state. Slot N loads the '<rom>-N.bst' file from the configured state directory (slot 1 = <rom>-1.bst). Requires a loaded cartridge with power on; restores full CPU/PPU/APU/WRAM/VRAM/CGRAM/OAM state.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["slot"],
+              "properties": {
+                "slot": { "type": "integer", "minimum": 1,
+                          "description": "Quick-save slot number matching the -N.bst filename suffix.",
+                          "example": 1 }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "State loaded",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "loaded": { "type": "boolean" },
+                         "slot":   { "type": "integer" }
+                       }}
+                   }}},
+          "400": { "description": "Missing or invalid slot." },
+          "409": { "description": "No cartridge loaded, or power is off." },
+          "422": { "description": "State file does not exist or could not be loaded." }
+        }
+      }
+    },
+
+    "/state/load-file": {
+      "post": {
+        "summary": "Load a save state from an arbitrary path",
+        "operationId": "loadStateFile",
+        "description": "Loads a bsnes-plus save state (.bst) from an arbitrary filesystem path, not restricted to the numbered quick-save slots. Requires a loaded cartridge with power on; restores full CPU/PPU/APU/WRAM/VRAM/CGRAM/OAM state.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "required": ["path"],
+              "properties": {
+                "path": { "type": "string",
+                          "description": "Absolute filesystem path to a .bst save-state file.",
+                          "example": "/home/user/som-ending.bst" }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "State loaded",
+                   "content": { "application/json": {
+                     "schema": { "type": "object",
+                       "properties": {
+                         "loaded": { "type": "boolean" },
+                         "path":   { "type": "string" }
+                       }}
+                   }}},
+          "400": { "description": "Missing or invalid path." },
+          "409": { "description": "No cartridge loaded, or power is off." },
+          "422": { "description": "State file does not exist or could not be loaded." }
         }
       }
     },

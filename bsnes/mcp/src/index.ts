@@ -254,6 +254,46 @@ server.tool(
   })
 );
 
+server.tool(
+  "bsnes_load_state",
+  "Load a bsnes-plus quick-save state by slot number. Slot N loads the " +
+  "'<rom>-N.bst' save file from the configured state directory (slot 1 = " +
+  "'som-1.bst'). Restores the full machine snapshot — CPU/PPU/APU registers " +
+  "and WRAM/VRAM/CGRAM/OAM — so you resume exactly where the state was saved. " +
+  "Requires a loaded cartridge with power on (power-cycle or reach any live " +
+  "screen first). Fails with 422 if the slot's .bst file does not exist.",
+  {
+    slot: z.number().int().min(1)
+      .describe("Quick-save slot number, matching the '-N.bst' filename suffix (slot 1 = <rom>-1.bst)."),
+  },
+  async ({ slot }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(await api("POST", "/state/load", { slot }), null, 2)
+    }]
+  })
+);
+
+server.tool(
+  "bsnes_load_state_file",
+  "Load a bsnes-plus save state (.bst) from an arbitrary filesystem path — " +
+  "any file, not restricted to the numbered quick-save slots. Restores the " +
+  "full machine snapshot: CPU/PPU/APU registers and WRAM/VRAM/CGRAM/OAM. " +
+  "Requires a loaded cartridge with power on. Fails with 422 if the path does " +
+  "not exist or is not a valid save state for the loaded cartridge. For the " +
+  "numbered quick-save slots (<rom>-N.bst), use bsnes_load_state instead.",
+  {
+    path: z.string()
+      .describe("Absolute filesystem path to a .bst save-state file, e.g. '/home/user/som-ending.bst'"),
+  },
+  async ({ path }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(await api("POST", "/state/load-file", { path }), null, 2)
+    }]
+  })
+);
+
 // CPU registers and disassembly
 
 server.tool(

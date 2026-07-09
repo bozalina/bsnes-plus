@@ -375,10 +375,7 @@ server.tool(
   "Returns a 'provenance' array where each entry is either a 6-digit hex " +
   "ROM address (where the byte was originally copied from) or null (byte " +
   "has no ROM origin — written by game code or never set). " +
-  "Use this whenever the CPU is executing from WRAM: call this with the " +
-  "current PC area to find the corresponding ROM addresses, then use " +
-  "diz_get_byte_by_snes_address on those ROM addresses to annotate the " +
-  "correct location in Diz. Provenance chains (WRAM-to-WRAM copies) are " +
+  "Provenance chains (WRAM-to-WRAM copies) are " +
   "resolved automatically to the ultimate ROM origin. " +
   "Requires the emulator to be paused.",
   {
@@ -574,7 +571,10 @@ server.tool(
   "Add a breakpoint. Set mode to one or more of Exec, Read, Write. " +
   "Source is typically CPUBus for code breakpoints. " +
   "Optionally specify a data value and comparison operator to break only " +
-  "when a specific value is read or written.",
+  "when a specific value is read or written. " +
+  "An Exec breakpoint's hit counter can increment without the run pausing " +
+  "where you expect; after it fires, read bsnes_get_registers and confirm " +
+  "the actual PC before reasoning.",
   {
     addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2'"),
     mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1)

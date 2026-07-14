@@ -348,6 +348,90 @@ server.tool(
   })
 );
 
+// SMP (SPC700 audio CPU) registers, disassembly, and stepping
+
+server.tool(
+  "bsnes_smp_get_registers",
+  "Read all SPC700 (S-SMP audio CPU) registers (PC 16-bit; A, X, Y, SP 8-bit) " +
+  "and PSW flags (N, V, P, B, H, I, Z, C) as hex strings / booleans. The SPC700 " +
+  "is the sound CPU that runs the audio driver, separate from the main 65C816. " +
+  "Its stack lives in page $01xx. Requires the emulator to be paused.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("GET", "/smp/registers"), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_smp_set_registers",
+  "Write one or more SPC700 registers or PSW flags. Omit fields to leave them " +
+  "unchanged. Pass registers as hex strings (e.g. { pc: '0200' }) and flags " +
+  "nested under a 'flags' object (e.g. { flags: { c: true } }). Registers: " +
+  "pc, a, x, y, sp, p. Flags: n, v, p, b, h, i, z, c. " +
+  "Requires the emulator to be paused.",
+  {
+    registers: z.record(z.string()).optional()
+      .describe("Register values as hex strings: pc, a, x, y, sp, p"),
+    flags: z.record(z.boolean()).optional()
+      .describe("PSW flag values as booleans: n, v, p, b, h, i, z, c"),
+  },
+  async ({ registers, flags }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(
+        await api("PUT", "/smp/registers", { ...registers, flags }),
+        null, 2
+      )
+    }]
+  })
+);
+
+server.tool(
+  "bsnes_smp_disassemble_current",
+  "Disassemble ONLY the current SPC700 instruction (at the current SMP PC). " +
+  "There is no look-ahead — to inspect the next instruction, step the SMP " +
+  "first, then call this again. Requires the emulator to be paused.",
+  {},
+  async () => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(await api("GET", "/smp/disassemble"), null, 2)
+    }]
+  })
+);
+
+server.tool(
+  "bsnes_smp_step_into",
+  "Execute exactly one SPC700 instruction and return the resulting state (both " +
+  "cpu and smp blocks). The break lands on the next SMP instruction; the main " +
+  "65C816 runs freely in the meantime. Enters subroutines (CALL/PCALL/TCALL). " +
+  "Blocks until the step completes.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("POST", "/smp/step/into"), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_smp_step_over",
+  "Execute one SPC700 instruction, stepping over subroutine calls " +
+  "(CALL/PCALL/TCALL) without entering them. Blocks until the step completes.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("POST", "/smp/step/over"), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_smp_step_out",
+  "Run the SPC700 until the current subroutine returns (RET) and return the " +
+  "resulting state. Blocks until complete.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("POST", "/smp/step/out"), null, 2) }]
+  })
+);
+
 server.tool(
   "bsnes_get_usage",
   "Read per-byte execution history for a range of SNES addresses. Each entry " +
@@ -400,11 +484,13 @@ server.tool(
 server.tool(
   "bsnes_read_memory",
   "Read bytes from a SNES memory bus. " +
-  "Sources: cpu (full 24-bit bus, use for WRAM/ROM/registers), " +
+  "Sources: cpu (full 24-bit S-CPU bus, use for WRAM/ROM/registers), " +
+  "apu (full 16-bit SPC700 bus), apuram (the SPC700's 64 KB RAM — SMP code, " +
+  "the $F4-$F7 mailbox ports), dsp (the 128 S-DSP registers), " +
   "vram, oam, cgram, cartrom (raw ROM file), cartram (save RAM). " +
   "Count is capped at 4096. Requires the emulator to be paused.",
   {
-    source: z.enum(["cpu", "vram", "oam", "cgram", "cartrom", "cartram"])
+    source: z.enum(["cpu", "apu", "apuram", "dsp", "vram", "oam", "cgram", "cartrom", "cartram"])
       .describe("Memory bus to read from"),
     addr: z.string().describe("Start address in hex"),
     count: z.number().int().min(1).max(4096).default(256)
@@ -569,18 +655,21 @@ server.tool(
 server.tool(
   "bsnes_add_breakpoint",
   "Add a breakpoint. Set mode to one or more of Exec, Read, Write. " +
-  "Source is typically CPUBus for code breakpoints. " +
+  "Source is typically CPUBus for S-CPU code breakpoints; use APURAM to watch " +
+  "SPC700 RAM (Exec breaks on SMP code, Read/Write on SMP RAM access) and DSP " +
+  "to watch S-DSP register access. " +
   "Optionally specify a data value and comparison operator to break only " +
   "when a specific value is read or written. " +
   "An Exec breakpoint's hit counter can increment without the run pausing " +
-  "where you expect; after it fires, read bsnes_get_registers and confirm " +
-  "the actual PC before reasoning.",
+  "where you expect; after it fires, read bsnes_get_registers (or " +
+  "bsnes_smp_get_registers for APURAM/DSP breakpoints) and confirm the actual " +
+  "PC before reasoning.",
   {
-    addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2'"),
+    addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2' (or a 16-bit SPC700 address for APURAM/DSP)"),
     mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1)
       .describe("When to trigger: Exec, Read, and/or Write"),
-    source: z.enum(["CPUBus", "VRAM", "OAM", "CGRAM"]).default("CPUBus")
-      .describe("Memory bus to watch (default CPUBus)"),
+    source: z.enum(["CPUBus", "APURAM", "DSP", "VRAM", "OAM", "CGRAM"]).default("CPUBus")
+      .describe("Memory bus to watch (default CPUBus; APURAM = SPC700 RAM, DSP = S-DSP registers)"),
     addrEnd: z.string().optional()
       .describe("End of address range for range breakpoints (optional)"),
     data: z.number().int().min(-1).max(255).default(-1)

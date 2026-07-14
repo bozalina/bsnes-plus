@@ -85,7 +85,8 @@ void BsnesApiServer::notifyBreak() {
 
 json BsnesApiServer::doStep(SNES::Debugger::StepType type,
                              bool stepOverNew,
-                             std::chrono::seconds timeout) {
+                             std::chrono::seconds timeout,
+                             StepTarget target) {
     // Reset the break flag before triggering — avoids a stale notification.
     {
         std::lock_guard<std::mutex> lock(_breakMutex);
@@ -94,9 +95,13 @@ json BsnesApiServer::doStep(SNES::Debugger::StepType type,
 
     // Dispatch step setup to the Qt main thread (non-blocking — the emulator
     // must be free to run; a blocking dispatch would deadlock).
-    dispatch([type, stepOverNew]() {
+    // step_cpu / step_smp select which processor the break lands on. Both are
+    // set explicitly so the target is deterministic regardless of prior state
+    // (a preceding SMP step leaves step_smp set, and vice versa).
+    dispatch([type, stepOverNew, target]() {
         SNES::debugger.step_type    = type;
-        SNES::debugger.step_cpu     = true;   // ensure CPU stepping is on
+        SNES::debugger.step_cpu     = (target == StepTarget::CPU);
+        SNES::debugger.step_smp     = (target == StepTarget::SMP);
         SNES::debugger.call_count   = 0;
         if (stepOverNew) {
             SNES::debugger.step_over_new = true;
@@ -155,6 +160,37 @@ json BsnesApiServer::getCpuStateJson() {
     return {{"registers", regs}, {"flags", flags}};
 }
 
+// ── getSmpStateJson ───────────────────────────────────────────────────────────
+// SPC700 (S-SMP) state. Must be called from the Qt main thread (emulator paused).
+
+json BsnesApiServer::getSmpStateJson() {
+    using R = SNES::SMPDebugger::Register;
+    using F = SNES::SMPDebugger;
+    auto& smp = SNES::smp;
+
+    json regs = {
+        {"pc", hexStr(smp.getRegister(R::RegisterPC), 4)},
+        {"a",  hexStr(smp.getRegister(R::RegisterA),  2)},
+        {"x",  hexStr(smp.getRegister(R::RegisterX),  2)},
+        {"y",  hexStr(smp.getRegister(R::RegisterY),  2)},
+        {"sp", hexStr(smp.getRegister(R::RegisterS),  2)},
+        {"p",  hexStr(smp.getRegister(R::RegisterP),  2)},
+    };
+
+    json flags = {
+        {"n", smp.getFlag(F::FlagN)},
+        {"v", smp.getFlag(F::FlagV)},
+        {"p", smp.getFlag(F::FlagP)},
+        {"b", smp.getFlag(F::FlagB)},
+        {"h", smp.getFlag(F::FlagH)},
+        {"i", smp.getFlag(F::FlagI)},
+        {"z", smp.getFlag(F::FlagZ)},
+        {"c", smp.getFlag(F::FlagC)},
+    };
+
+    return {{"registers", regs}, {"flags", flags}};
+}
+
 // ── buildBreakResult ──────────────────────────────────────────────────────────
 // Assembles the JSON payload returned by break/step endpoints.
 // Must be called from the Qt main thread.
@@ -181,6 +217,7 @@ json BsnesApiServer::buildBreakResult() {
         {"opcodeAddr",    hexStr(SNES::cpu.opcode_pc, 6)},
         {"disasm",        std::string(buf)},
         {"cpu",           getCpuStateJson()},
+        {"smp",           getSmpStateJson()},
     };
     return result;
 }
@@ -761,6 +798,133 @@ void BsnesApiServer::setupRoutes() {
         sendJson(res, result);
     });
 
+    // ── GET /smp/registers ───────────────────────────────────────────────────
+    _svr->Get("/smp/registers", [this](const httplib::Request&, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        json result;
+        dispatch([this, &result]() {
+            result = getSmpStateJson();
+        }, true);
+        sendJson(res, result);
+    });
+
+    // ── PUT /smp/registers ───────────────────────────────────────────────────
+    _svr->Put("/smp/registers", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_JSON", "Body is not valid JSON."); return; }
+
+        json result;
+        dispatch([this, &body, &result]() {
+            using R = SNES::SMPDebugger::Register;
+            using F = SNES::SMPDebugger;
+            auto& smp = SNES::smp;
+
+            // Parse hex-string register values
+            auto setReg = [&](const std::string& key, R reg) {
+                if (body.contains(key) && body[key].is_string()) {
+                    unsigned val = (unsigned)std::stoul(body[key].get<std::string>(), nullptr, 16);
+                    smp.setRegister((unsigned)reg, val);
+                }
+            };
+            setReg("pc", R::RegisterPC);
+            setReg("a",  R::RegisterA);
+            setReg("x",  R::RegisterX);
+            setReg("y",  R::RegisterY);
+            setReg("sp", R::RegisterS);
+            setReg("p",  R::RegisterP);
+
+            // Parse boolean flag values from nested "flags" object
+            if (body.contains("flags") && body["flags"].is_object()) {
+                auto& f = body["flags"];
+                if (f.contains("n") && f["n"].is_boolean()) smp.setFlag(F::FlagN, f["n"].get<bool>());
+                if (f.contains("v") && f["v"].is_boolean()) smp.setFlag(F::FlagV, f["v"].get<bool>());
+                if (f.contains("p") && f["p"].is_boolean()) smp.setFlag(F::FlagP, f["p"].get<bool>());
+                if (f.contains("b") && f["b"].is_boolean()) smp.setFlag(F::FlagB, f["b"].get<bool>());
+                if (f.contains("h") && f["h"].is_boolean()) smp.setFlag(F::FlagH, f["h"].get<bool>());
+                if (f.contains("i") && f["i"].is_boolean()) smp.setFlag(F::FlagI, f["i"].get<bool>());
+                if (f.contains("z") && f["z"].is_boolean()) smp.setFlag(F::FlagZ, f["z"].get<bool>());
+                if (f.contains("c") && f["c"].is_boolean()) smp.setFlag(F::FlagC, f["c"].get<bool>());
+            }
+            result = getSmpStateJson();
+        }, true);
+        sendJson(res, result);
+    });
+
+    // ── GET /smp/disassemble — CURRENT INSTRUCTION ONLY ──────────────────────
+    // Returns only the single instruction at the current SMP PC. Same strict
+    // no-look-ahead contract as /cpu/disassemble: to see the next instruction,
+    // step the SMP and call again.
+    _svr->Get("/smp/disassemble", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!requirePaused(res)) return;
+
+        // Reject the old look-ahead parameters loudly rather than ignoring them.
+        if (req.has_param("addr") || req.has_param("lines")) {
+            sendError(res, 400, "PARAMS_REMOVED",
+                      "/smp/disassemble does not accept 'addr' or 'lines'. "
+                      "It returns only the instruction at the current SMP PC. "
+                      "Step to the instruction you want, then call with no params.");
+            return;
+        }
+
+        json result;
+        dispatch([this, &result]() {
+            uint16_t pc = SNES::smp.opcode_pc;
+
+            char buf[256];
+            SNES::smp.disassemble_opcode(buf, pc);
+
+            // Instruction length from the usage map (current PC is, by
+            // definition, an executed opcode). Wraps within the 16-bit space.
+            int len = 1;
+            for (int k = 1; k <= 4; ++k) {
+                uint16_t next = (uint16_t)(pc + k);
+                if (SNES::smp.usage[next] & SNES::SMPDebugger::UsageOpcode) {
+                    len = k;
+                    break;
+                }
+            }
+
+            json bytes = json::array();
+            for (int b = 0; b < len; ++b)
+                bytes.push_back((int)SNES::debugger.read(
+                    SNES::Debugger::MemorySource::APURAM, (uint16_t)(pc + b)));
+
+            result = {
+                {"addr",  hexStr(pc, 4)},
+                {"bytes", bytes},
+                {"text",  std::string(buf)},
+            };
+        }, true);
+
+        sendJson(res, result);
+    });
+
+    // ── POST /smp/step/into ──────────────────────────────────────────────────
+    _svr->Post("/smp/step/into", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepInto,
+                             false, std::chrono::seconds(30), StepTarget::SMP);
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /smp/step/over ──────────────────────────────────────────────────
+    _svr->Post("/smp/step/over", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepOver,
+                             /*stepOverNew=*/true, std::chrono::seconds(30), StepTarget::SMP);
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
+    // ── POST /smp/step/out ───────────────────────────────────────────────────
+    _svr->Post("/smp/step/out", [this](const httplib::Request&, httplib::Response& res) {
+        auto result = doStep(SNES::Debugger::StepType::StepOut,
+                             false, std::chrono::seconds(30), StepTarget::SMP);
+        int status = result.contains("code") ? 408 : 200;
+        sendJson(res, result, status);
+    });
+
     // ── GET /wram/provenance?addr=7E8000&count=256 ───────────────────────────
     _svr->Get("/wram/provenance", [this](const httplib::Request& req,
                                           httplib::Response& res) {
@@ -1319,6 +1483,42 @@ void BsnesApiServer::setupRoutes() {
         }
       },
 
+      "SmpRegisters": {
+        "type": "object",
+        "description": "SPC700 (S-SMP) register values as uppercase hex strings.",
+        "properties": {
+          "pc": { "type": "string", "example": "0200", "description": "16-bit program counter." },
+          "a":  { "type": "string", "example": "12", "description": "8-bit accumulator." },
+          "x":  { "type": "string", "example": "00", "description": "8-bit X index." },
+          "y":  { "type": "string", "example": "00", "description": "8-bit Y index." },
+          "sp": { "type": "string", "example": "EF", "description": "8-bit stack pointer (stack lives in page $01xx)." },
+          "p":  { "type": "string", "example": "02", "description": "Processor status word (PSW) byte." }
+        }
+      },
+
+      "SmpFlags": {
+        "type": "object",
+        "description": "SPC700 processor status word (PSW) flags.",
+        "properties": {
+          "n": { "type": "boolean", "description": "Negative" },
+          "v": { "type": "boolean", "description": "Overflow" },
+          "p": { "type": "boolean", "description": "Direct page select (true=page $01xx)" },
+          "b": { "type": "boolean", "description": "Break" },
+          "h": { "type": "boolean", "description": "Half-carry" },
+          "i": { "type": "boolean", "description": "Interrupt enable" },
+          "z": { "type": "boolean", "description": "Zero" },
+          "c": { "type": "boolean", "description": "Carry" }
+        }
+      },
+
+      "SmpState": {
+        "type": "object",
+        "properties": {
+          "registers": { "$ref": "#/components/schemas/SmpRegisters" },
+          "flags":     { "$ref": "#/components/schemas/SmpFlags" }
+        }
+      },
+
       "BreakResult": {
         "type": "object",
         "description": "Returned by break and all step endpoints after execution halts.",
@@ -1331,7 +1531,9 @@ void BsnesApiServer::setupRoutes() {
           "opcodeAddr":    { "type": "string", "example": "C0A3F2" },
           "disasm":        { "type": "string",
                              "example": "C0/A3F2 LDA #$01" },
-          "cpu":           { "$ref": "#/components/schemas/CpuState" }
+          "cpu":           { "$ref": "#/components/schemas/CpuState" },
+          "smp":           { "$ref": "#/components/schemas/SmpState",
+                             "description": "SPC700 state at the break. opcodeAddr/disasm above always describe the CPU; for the SMP instruction at smp.registers.pc use GET /smp/disassemble." }
         }
       },
 
@@ -1783,6 +1985,122 @@ void BsnesApiServer::setupRoutes() {
                      "schema": { "$ref": "#/components/schemas/Error" }
                    }}},
           "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/smp/registers": {
+      "get": {
+        "summary": "Read SPC700 registers and flags",
+        "operationId": "getSmpRegisters",
+        "description": "Returns all SPC700 (S-SMP) registers (PC, A, X, Y, SP, P) and PSW flags. Requires paused state.",
+        "responses": {
+          "200": { "description": "OK",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/SmpState" }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" },
+          "503": { "$ref": "#/components/responses/NoCartridge" }
+        }
+      },
+      "put": {
+        "summary": "Write SPC700 registers and/or flags",
+        "operationId": "putSmpRegisters",
+        "description": "Sets one or more SPC700 registers or PSW flags. Omitted fields are unchanged. Flags must be nested inside a 'flags' object. Requires paused state.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": {
+              "type": "object",
+              "description": "Any combination of register (hex string) fields and an optional 'flags' object.",
+              "properties": {
+                "pc": { "type": "string" }, "a": { "type": "string" },
+                "x":  { "type": "string" }, "y": { "type": "string" },
+                "sp": { "type": "string" }, "p": { "type": "string" },
+                "flags": {
+                  "type": "object",
+                  "description": "PSW flags to update.",
+                  "properties": {
+                    "n": { "type": "boolean" }, "v": { "type": "boolean" },
+                    "p": { "type": "boolean" }, "b": { "type": "boolean" },
+                    "h": { "type": "boolean" }, "i": { "type": "boolean" },
+                    "z": { "type": "boolean" }, "c": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }}
+        },
+        "responses": {
+          "200": { "description": "Updated state",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/SmpState" }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/smp/disassemble": {
+      "get": {
+        "summary": "Disassemble the current SPC700 instruction",
+        "operationId": "disassembleSmp",
+        "description": "Returns the single instruction at the current SPC700 program counter. There is no look-ahead window — to see the next instruction, step the SMP and call again. Takes no parameters; passing 'addr' or 'lines' returns 400.",
+        "responses": {
+          "200": { "description": "The current SMP instruction",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/DisassemblyLine" }
+                   }}},
+          "400": { "description": "The unsupported 'addr' or 'lines' parameter was supplied.",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/Error" }
+                   }}},
+          "409": { "$ref": "#/components/responses/NotPaused" }
+        }
+      }
+    },
+
+    "/smp/step/into": {
+      "post": {
+        "summary": "Step the SPC700 into one instruction",
+        "operationId": "smpStepInto",
+        "description": "Executes exactly one SPC700 instruction and returns the resulting state (both cpu and smp blocks). The break lands on the next SMP instruction; the S-CPU runs freely in the meantime. Blocks until complete.",
+        "responses": {
+          "200": { "description": "Step complete",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/BreakResult" }
+                   }}},
+          "408": { "description": "Step timed out (30s)" }
+        }
+      }
+    },
+
+    "/smp/step/over": {
+      "post": {
+        "summary": "Step the SPC700 over one instruction",
+        "operationId": "smpStepOver",
+        "description": "Executes one SPC700 instruction, stepping over CALL/PCALL/TCALL rather than entering them. Blocks until complete.",
+        "responses": {
+          "200": { "description": "Step complete",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/BreakResult" }
+                   }}},
+          "408": { "description": "Step timed out (30s)" }
+        }
+      }
+    },
+
+    "/smp/step/out": {
+      "post": {
+        "summary": "Step the SPC700 out of subroutine",
+        "operationId": "smpStepOut",
+        "description": "Runs the SPC700 until the current subroutine returns (RET). Blocks until complete.",
+        "responses": {
+          "200": { "description": "Step complete",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/BreakResult" }
+                   }}},
+          "408": { "description": "Step timed out (30s)" }
         }
       }
     },

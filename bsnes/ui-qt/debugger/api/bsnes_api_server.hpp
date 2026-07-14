@@ -44,6 +44,7 @@ private:
 
     // ── State helpers (must be called from Qt main thread) ───────────────
     json getCpuStateJson();
+    json getSmpStateJson();
     json buildBreakResult();
     json readMemory(const std::string& source, uint32_t addr, int count);
     void writeMemory(const std::string& source, uint32_t addr,
@@ -59,11 +60,17 @@ private:
                      SNES::Debugger::MemorySource& out);
 
     // ── Step helper ──────────────────────────────────────────────────────
+    // Selects which processor a step targets. The CPU and SMP debuggers run
+    // concurrently and both consult debugger.step_type, so the step selector
+    // (step_cpu / step_smp) decides which one the break lands on.
+    enum class StepTarget { CPU, SMP };
+
     // Triggers a step type on the Qt thread (non-blocking), then waits on
     // _breakCv until the emulator breaks or timeout expires.
     json doStep(SNES::Debugger::StepType type,
                 bool stepOverNew = false,
-                std::chrono::seconds timeout = std::chrono::seconds(30));
+                std::chrono::seconds timeout = std::chrono::seconds(30),
+                StepTarget target = StepTarget::CPU);
 
     // ── Breakpoint serialisation ─────────────────────────────────────────
     json breakpointToJson(int index, const SNES::Debugger::Breakpoint& bp);

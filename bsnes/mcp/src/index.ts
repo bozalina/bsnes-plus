@@ -645,7 +645,8 @@ server.tool(
 server.tool(
   "bsnes_list_breakpoints",
   "List all currently set breakpoints with their indices, addresses, modes, " +
-  "and hit counts. Use indices with bsnes_delete_breakpoint.",
+  "sources, and hit counts. Pass an entry's addr/mode/source to " +
+  "bsnes_delete_breakpoint to remove it.",
   {},
   async () => ({
     content: [{ type: "text", text: JSON.stringify(await api("GET", "/breakpoints"), null, 2) }]
@@ -691,36 +692,27 @@ server.tool(
 
 server.tool(
   "bsnes_delete_breakpoint",
-  "Remove breakpoints. Either pass 'index' (from bsnes_list_breakpoints), or " +
-  "target by attributes with 'addr' + 'mode' (+ 'source', default CPUBus) to " +
-  "delete every breakpoint matching that address, exact mode-set, and source. " +
-  "The attribute form needs no index lookup and is unaffected by the " +
-  "renumbering that follows earlier deletions, so it's ideal for a fire-then-" +
-  "remove-by-address loop. It deletes all matches and errors if none match. " +
-  "If 'index' is given it takes precedence.",
+  "Remove every breakpoint matching an address, exact mode-set, and source. " +
+  "Deletes by attributes rather than index, so it needs no lookup and is " +
+  "unaffected by the renumbering that follows earlier deletions — ideal for a " +
+  "fire-then-remove-by-address loop. Removes all matches and errors if none " +
+  "match. To remove every breakpoint at once, use bsnes_clear_breakpoints.",
   {
-    index: z.number().int().min(0).optional()
-      .describe("Breakpoint index to remove (from bsnes_list_breakpoints). Omit to delete by attributes."),
-    addr: z.string().optional()
-      .describe("Attribute delete: address in hex, e.g. '07CE'. Requires 'mode'."),
-    mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1).optional()
-      .describe("Attribute delete: exact mode-set to match (Exec, Read, and/or Write)."),
+    addr: z.string()
+      .describe("Address in hex, e.g. '07CE' (or a 16-bit SPC700 address for APURAM/DSP)."),
+    mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1)
+      .describe("Exact mode-set to match: Exec, Read, and/or Write."),
     source: z.enum(["CPUBus", "APURAM", "DSP", "VRAM", "OAM", "CGRAM"]).default("CPUBus")
-      .describe("Attribute delete: memory bus of the breakpoint (default CPUBus; e.g. APURAM)."),
+      .describe("Memory bus of the breakpoint (default CPUBus; APURAM = SPC700 RAM, DSP = S-DSP registers)."),
   },
-  async ({ index, addr, mode, source }) => {
-    let result: unknown;
-    if (index !== undefined) {
-      result = await api("DELETE", `/breakpoints/${index}`);
-    } else if (addr !== undefined && mode !== undefined) {
-      const qs = new URLSearchParams({ addr, source, mode: mode.join(",") }).toString();
-      result = await api("DELETE", `/breakpoints?${qs}`);
-    } else {
-      throw new Error(
-        "Provide either 'index', or 'addr' + 'mode' (+ optional 'source') to delete by attributes."
-      );
-    }
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  async ({ addr, mode, source }) => {
+    const qs = new URLSearchParams({ addr, source, mode: mode.join(",") }).toString();
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(await api("DELETE", `/breakpoints?${qs}`), null, 2)
+      }]
+    };
   }
 );
 

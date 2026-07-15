@@ -664,7 +664,10 @@ server.tool(
   "An Exec breakpoint's hit counter can increment without the run pausing " +
   "where you expect; after it fires, read bsnes_get_registers (or " +
   "bsnes_smp_get_registers for APURAM/DSP breakpoints) and confirm the actual " +
-  "PC before reasoning.",
+  "PC before reasoning. " +
+  "Set once=true for a one-shot breakpoint that auto-removes itself the moment " +
+  "it fires — ideal for confirming each of many paths exactly once without " +
+  "managing deletion, and it can't re-trap.",
   {
     addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2' (or a 16-bit SPC700 address for APURAM/DSP)"),
     mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1)
@@ -678,12 +681,14 @@ server.tool(
     compare: z.enum(["Equal", "NotEqual", "Less", "LessEqual", "Greater", "GreaterEqual"])
       .default("Equal")
       .describe("Comparison operator for data condition (default Equal)"),
+    once: z.boolean().default(false)
+      .describe("One-shot: auto-remove this breakpoint the moment it fires (default false)"),
   },
-  async ({ addr, mode, source, addrEnd, data, compare }) => ({
+  async ({ addr, mode, source, addrEnd, data, compare, once }) => ({
     content: [{
       type: "text",
       text: JSON.stringify(
-        await api("POST", "/breakpoints", { addr, mode, source, addrEnd, data, compare }),
+        await api("POST", "/breakpoints", { addr, mode, source, addrEnd, data, compare, once }),
         null, 2
       )
     }]

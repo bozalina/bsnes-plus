@@ -72,6 +72,17 @@ void BsnesApiServer::dispatch(std::function<void()> fn, bool blocking) {
 
 void BsnesApiServer::notifyBreak() {
     auto result = buildBreakResult();   // safe: Qt thread, emulator halted
+
+    // One-shot breakpoints: remove the fired breakpoint now that its details
+    // are captured in `result`, so it can't re-trap. breakpoint_hit is unsigned,
+    // so the soft-break sentinels (SoftBreakCPU/SA1, negative) wrap above size()
+    // and are excluded by the bounds check.
+    if (SNES::debugger.break_event == SNES::Debugger::BreakEvent::BreakpointHit
+        && SNES::debugger.breakpoint_hit < SNES::debugger.breakpoint.size()
+        && SNES::debugger.breakpoint[SNES::debugger.breakpoint_hit].once) {
+        SNES::debugger.breakpoint.remove(SNES::debugger.breakpoint_hit);
+    }
+
     {
         std::lock_guard<std::mutex> lock(_breakMutex);
         _breakOccurred = true;
@@ -383,6 +394,7 @@ json BsnesApiServer::breakpointToJson(int index,
         {"compare", cmpStr},
         {"data",    bp.data},
         {"counter", bp.counter},
+        {"once",    bp.once},
     };
     if (bp.addr_end > 0)
         j["addrEnd"] = hexStr(bp.addr_end, 6);
@@ -1380,6 +1392,10 @@ void BsnesApiServer::setupRoutes() {
         if (body.contains("data") && body["data"].is_number_integer())
             bp.data = body["data"].get<int>();
 
+        // once (optional, default false): auto-remove the moment it first fires
+        if (body.contains("once") && body["once"].is_boolean())
+            bp.once = body["once"].get<bool>();
+
         // compare (optional, default Equal)
         if (body.contains("compare") && body["compare"].is_string()) {
             using Cmp = SNES::Debugger::Breakpoint::Compare;
@@ -1682,7 +1698,9 @@ void BsnesApiServer::setupRoutes() {
           "source":  { "type": "string",
                        "enum": ["CPUBus","APURAM","DSP","VRAM","OAM","CGRAM","SA1Bus","SFXBus","SGBBus"] },
           "counter": { "type": "integer",
-                       "description": "Number of times this breakpoint has been hit." }
+                       "description": "Number of times this breakpoint has been hit." },
+          "once":    { "type": "boolean",
+                       "description": "If true, the breakpoint is auto-removed the moment it fires." }
         }
       },
 
@@ -2500,7 +2518,9 @@ void BsnesApiServer::setupRoutes() {
                              "items": { "type": "string", "enum": ["Exec","Read","Write"] },
                              "minItems": 1 },
                 "source":  { "type": "string",
-                             "enum": ["CPUBus","APURAM","DSP","VRAM","OAM","CGRAM","SA1Bus","SFXBus","SGBBus"] }
+                             "enum": ["CPUBus","APURAM","DSP","VRAM","OAM","CGRAM","SA1Bus","SFXBus","SGBBus"] },
+                "once":    { "type": "boolean", "default": false,
+                             "description": "Auto-remove the breakpoint the moment it first fires (one-shot)." }
               }
             }
           }}

@@ -38,6 +38,7 @@ public:
       SGBBus,
     } source = Source::CPUBus;
     unsigned counter = 0;  //number of times breakpoint has been hit since being set
+    bool once = false;  //if set, auto-removed the moment it fires (API one-shot breakpoints)
   };
   linear_vector<Breakpoint> breakpoint;
   unsigned breakpoint_hit;

@@ -691,17 +691,37 @@ server.tool(
 
 server.tool(
   "bsnes_delete_breakpoint",
-  "Remove a single breakpoint by its index. Use bsnes_list_breakpoints to " +
-  "find indices.",
+  "Remove breakpoints. Either pass 'index' (from bsnes_list_breakpoints), or " +
+  "target by attributes with 'addr' + 'mode' (+ 'source', default CPUBus) to " +
+  "delete every breakpoint matching that address, exact mode-set, and source. " +
+  "The attribute form needs no index lookup and is unaffected by the " +
+  "renumbering that follows earlier deletions, so it's ideal for a fire-then-" +
+  "remove-by-address loop. It deletes all matches and errors if none match. " +
+  "If 'index' is given it takes precedence.",
   {
-    index: z.number().int().min(0).describe("Breakpoint index to remove"),
+    index: z.number().int().min(0).optional()
+      .describe("Breakpoint index to remove (from bsnes_list_breakpoints). Omit to delete by attributes."),
+    addr: z.string().optional()
+      .describe("Attribute delete: address in hex, e.g. '07CE'. Requires 'mode'."),
+    mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1).optional()
+      .describe("Attribute delete: exact mode-set to match (Exec, Read, and/or Write)."),
+    source: z.enum(["CPUBus", "APURAM", "DSP", "VRAM", "OAM", "CGRAM"]).default("CPUBus")
+      .describe("Attribute delete: memory bus of the breakpoint (default CPUBus; e.g. APURAM)."),
   },
-  async ({ index }) => ({
-    content: [{
-      type: "text",
-      text: JSON.stringify(await api("DELETE", `/breakpoints/${index}`), null, 2)
-    }]
-  })
+  async ({ index, addr, mode, source }) => {
+    let result: unknown;
+    if (index !== undefined) {
+      result = await api("DELETE", `/breakpoints/${index}`);
+    } else if (addr !== undefined && mode !== undefined) {
+      const qs = new URLSearchParams({ addr, source, mode: mode.join(",") }).toString();
+      result = await api("DELETE", `/breakpoints?${qs}`);
+    } else {
+      throw new Error(
+        "Provide either 'index', or 'addr' + 'mode' (+ optional 'source') to delete by attributes."
+      );
+    }
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
 );
 
 server.tool(

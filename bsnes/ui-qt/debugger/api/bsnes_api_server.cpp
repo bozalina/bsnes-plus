@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
+#include <vector>
 
 // ── Global singleton ─────────────────────────────────────────────────────────
 BsnesApiServer* bsnesApiServer = nullptr;
@@ -1420,13 +1421,88 @@ void BsnesApiServer::setupRoutes() {
     });
 
     // ── DELETE /breakpoints ──────────────────────────────────────────────────
-    _svr->Delete("/breakpoints", [this](const httplib::Request&, httplib::Response& res) {
-        int cleared = 0;
-        dispatch([this, &cleared]() {
-            cleared = (int)SNES::debugger.breakpoint.size();
-            SNES::debugger.breakpoint.reset();
+    // With no query params: clears every breakpoint.
+    // With addr + source + mode query params: a targeted delete that removes
+    // every breakpoint whose address, source, and exact mode-set match. This
+    // avoids the index-lookup/renumber dance of DELETE /breakpoints/:index —
+    // callers delete by the same key they added with. All three params are
+    // required for a filtered delete; mode is a comma-separated list
+    // (e.g. mode=Exec or mode=Read,Write) matched as an exact set.
+    _svr->Delete("/breakpoints", [this](const httplib::Request& req, httplib::Response& res) {
+        bool filtered = req.has_param("addr") || req.has_param("source") || req.has_param("mode");
+
+        if (!filtered) {
+            int cleared = 0;
+            dispatch([this, &cleared]() {
+                cleared = (int)SNES::debugger.breakpoint.size();
+                SNES::debugger.breakpoint.reset();
+            }, true);
+            sendJson(res, {{"cleared", cleared}});
+            return;
+        }
+
+        if (!req.has_param("addr") || !req.has_param("source") || !req.has_param("mode")) {
+            sendError(res, 400, "MISSING_FIELD",
+                      "Filtered delete requires 'addr', 'source', and 'mode' query params.");
+            return;
+        }
+
+        // addr
+        unsigned filterAddr;
+        try { filterAddr = (unsigned)std::stoul(req.get_param_value("addr"), nullptr, 16); }
+        catch (...) { sendError(res, 400, "INVALID_PARAM", "Cannot parse addr."); return; }
+
+        // source
+        using BPSource = SNES::Debugger::Breakpoint::Source;
+        BPSource filterSource;
+        std::string srcStr = req.get_param_value("source");
+        if      (srcStr == "CPUBus")  filterSource = BPSource::CPUBus;
+        else if (srcStr == "APURAM")  filterSource = BPSource::APURAM;
+        else if (srcStr == "DSP")     filterSource = BPSource::DSP;
+        else if (srcStr == "VRAM")    filterSource = BPSource::VRAM;
+        else if (srcStr == "OAM")     filterSource = BPSource::OAM;
+        else if (srcStr == "CGRAM")   filterSource = BPSource::CGRAM;
+        else if (srcStr == "SA1Bus")  filterSource = BPSource::SA1Bus;
+        else if (srcStr == "SFXBus")  filterSource = BPSource::SFXBus;
+        else if (srcStr == "SGBBus")  filterSource = BPSource::SGBBus;
+        else { sendError(res, 400, "INVALID_SOURCE", "Unknown source: " + srcStr); return; }
+
+        // mode (comma-separated list, matched as an exact set)
+        using BPMode = SNES::Debugger::Breakpoint::Mode;
+        unsigned filterMode = 0;
+        std::string modeStr = req.get_param_value("mode");
+        for (size_t pos = 0; pos < modeStr.size(); ) {
+            size_t comma = modeStr.find(',', pos);
+            size_t len   = (comma == std::string::npos) ? modeStr.size() - pos : comma - pos;
+            std::string ms = modeStr.substr(pos, len);
+            if      (ms == "Exec")  filterMode |= (unsigned)BPMode::Exec;
+            else if (ms == "Read")  filterMode |= (unsigned)BPMode::Read;
+            else if (ms == "Write") filterMode |= (unsigned)BPMode::Write;
+            else if (!ms.empty()) { sendError(res, 400, "INVALID_MODE", "Unknown mode: " + ms); return; }
+            pos = (comma == std::string::npos) ? modeStr.size() : comma + 1;
+        }
+        if (filterMode == 0) { sendError(res, 400, "INVALID_MODE", "At least one mode is required."); return; }
+
+        json deletedArr = json::array();
+        dispatch([this, filterAddr, filterSource, filterMode, &deletedArr]() {
+            std::vector<int> hits;
+            for (unsigned i = 0; i < SNES::debugger.breakpoint.size(); ++i) {
+                const auto& bp = SNES::debugger.breakpoint[i];
+                if (bp.addr == filterAddr && bp.source == filterSource && bp.mode == filterMode)
+                    hits.push_back((int)i);
+            }
+            for (int i : hits)
+                deletedArr.push_back(breakpointToJson(i, SNES::debugger.breakpoint[i]));
+            // Remove back-to-front so earlier indices stay valid as we go.
+            for (auto it = hits.rbegin(); it != hits.rend(); ++it)
+                SNES::debugger.breakpoint.remove(*it);
         }, true);
-        sendJson(res, {{"cleared", cleared}});
+
+        if (deletedArr.empty()) {
+            sendError(res, 404, "NOT_FOUND", "No breakpoint matches addr/source/mode.");
+            return;
+        }
+        sendJson(res, {{"deleted", deletedArr}, {"count", deletedArr.size()}});
     });
 
     // ── GET /openapi.json ────────────────────────────────────────────────────
@@ -2437,14 +2513,33 @@ void BsnesApiServer::setupRoutes() {
         }
       },
       "delete": {
-        "summary": "Clear all breakpoints",
+        "summary": "Clear all breakpoints, or delete those matching addr/source/mode",
+        "description": "With no query params, clears every breakpoint. With addr, source and mode supplied, deletes every breakpoint whose address, source and exact mode-set match — a targeted delete that avoids index lookups. All three are required together for a filtered delete.",
         "operationId": "clearBreakpoints",
+        "parameters": [
+          { "name": "addr", "in": "query", "required": false,
+            "schema": { "type": "string" },
+            "description": "Filtered delete: hex address to match." },
+          { "name": "source", "in": "query", "required": false,
+            "schema": { "type": "string",
+                        "enum": ["CPUBus","APURAM","DSP","VRAM","OAM","CGRAM","SA1Bus","SFXBus","SGBBus"] },
+            "description": "Filtered delete: memory bus to match." },
+          { "name": "mode", "in": "query", "required": false,
+            "schema": { "type": "string" },
+            "description": "Filtered delete: comma-separated mode-set to match exactly, e.g. 'Exec' or 'Read,Write'." }
+        ],
         "responses": {
-          "200": { "description": "All cleared",
+          "200": { "description": "Cleared all (no filter), or deleted matches (filtered)",
                    "content": { "application/json": {
                      "schema": { "type": "object",
-                       "properties": { "cleared": { "type": "integer" } } }
-                   }}}
+                       "properties": {
+                         "cleared": { "type": "integer", "description": "Present for unfiltered clear-all." },
+                         "count":   { "type": "integer", "description": "Present for filtered delete: number removed." },
+                         "deleted": { "type": "array", "description": "Present for filtered delete: the removed breakpoints.",
+                                      "items": { "$ref": "#/components/schemas/Breakpoint" } } } }
+                   }}},
+          "400": { "description": "Filtered delete missing a required param or given an invalid value." },
+          "404": { "description": "Filtered delete matched no breakpoint." }
         }
       }
     },

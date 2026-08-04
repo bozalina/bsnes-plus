@@ -23,6 +23,30 @@ static std::string hexStr(uint32_t val, int width) {
     return ss.str();
 }
 
+// The Diz header comment attached to a CPU address in the loaded symbol file's
+// [comments] section, or "" if none. Surfaced on disassemble/break/step so a
+// function's header is visible the moment the PC lands on its entry — turning a
+// pass-through during a trace into a re-encounter with the header's claim.
+// Tries the raw address, then its canonical HiROM form: gameplay runs a
+// $00-$3F/$80-$BF ROM mirror of the $C0+ banks, while the .sym is keyed
+// canonical. Display aid only; must be called on the Qt main thread.
+static std::string commentForAddress(uint32_t addr) {
+    if (!debugger || !debugger->symbolsCPU) return "";
+    addr &= 0xFFFFFF;
+    auto lookup = [](uint32_t a) -> std::string {
+        Symbol c = debugger->symbolsCPU->getComment(a);
+        return c.isComment() ? std::string((const char*)c.name) : std::string();
+    };
+    std::string s = lookup(addr);
+    if (s.empty()) {
+        uint8_t  bank = (addr >> 16) & 0xFF;
+        uint16_t off  = addr & 0xFFFF;
+        if ((bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) && off >= 0x8000)
+            s = lookup((((bank & 0x3F) | 0xC0) << 16) | off);
+    }
+    return s;
+}
+
 // ── Constructor / destructor ─────────────────────────────────────────────────
 
 BsnesApiServer::BsnesApiServer() = default;
@@ -231,6 +255,8 @@ json BsnesApiServer::buildBreakResult() {
         {"cpu",           getCpuStateJson()},
         {"smp",           getSmpStateJson()},
     };
+    std::string cmt = commentForAddress(SNES::cpu.opcode_pc);
+    if (!cmt.empty()) result["comment"] = cmt;
     return result;
 }
 
@@ -769,6 +795,8 @@ void BsnesApiServer::setupRoutes() {
                 {"bytes", bytes},
                 {"text",  std::string(buf)},
             };
+            std::string cmt = commentForAddress(pc);
+            if (!cmt.empty()) result["comment"] = cmt;
         }, true);
 
         sendJson(res, result);

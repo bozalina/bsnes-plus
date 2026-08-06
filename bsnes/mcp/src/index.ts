@@ -104,7 +104,10 @@ server.tool(
   "bsnes_break",
   "Pause the emulator immediately. Returns CPU registers, the current " +
   "instruction, and what triggered the break. Use before reading registers " +
-  "or memory.",
+  "or memory. At a labeled entry, the response also carries a `comment`: the " +
+  "loaded symbol file's first-line comment for the function (mirror-canonicalised, so it fires at the " +
+  "$00-$3F/$80-$BF gameplay mirrors too) -- a live drift-check against actual " +
+  "behaviour.",
   {},
   async () => ({
     content: [{ type: "text", text: JSON.stringify(await api("POST", "/break"), null, 2) }]
@@ -136,7 +139,10 @@ server.tool(
 server.tool(
   "bsnes_step_into",
   "Execute exactly one 65C816 instruction and return the resulting CPU state. " +
-  "Enters subroutines (JSR/JSL). Blocks until the step completes.",
+  "Enters subroutines (JSR/JSL). Blocks until the step completes. When stepping " +
+  "into a JSR/JSL lands the PC on a labeled entry, the response also carries a " +
+  "`comment` (the loaded symbol file's first-line comment for the function) -- a live drift-check on the " +
+  "callee's contract.",
   {},
   async () => ({
     content: [{ type: "text", text: JSON.stringify(await api("POST", "/step/into"), null, 2) }]
@@ -146,7 +152,9 @@ server.tool(
 server.tool(
   "bsnes_step_over",
   "Execute one instruction, stepping over subroutine calls (JSR/JSL) without " +
-  "entering them. Blocks until the step completes.",
+  "entering them. Blocks until the step completes. If the resulting PC is a " +
+  "labeled entry, the response also carries a `comment` (the loaded symbol " +
+  "file's first-line comment for the function) -- a live drift-check.",
   {},
   async () => ({
     content: [{ type: "text", text: JSON.stringify(await api("POST", "/step/over"), null, 2) }]
@@ -156,7 +164,9 @@ server.tool(
 server.tool(
   "bsnes_step_out",
   "Run until the current subroutine returns (RTS/RTL/RTI) and return the " +
-  "resulting CPU state. Blocks until complete.",
+  "resulting CPU state. Blocks until complete. If the return lands on a labeled " +
+  "entry, the response also carries a `comment` (the loaded symbol file's " +
+  "first-line comment for the function) -- a live drift-check.",
   {},
   async () => ({
     content: [{ type: "text", text: JSON.stringify(await api("POST", "/step/out"), null, 2) }]
@@ -360,7 +370,10 @@ server.tool(
   "live M/X state at that PC. There is no look-ahead — to inspect the next " +
   "instruction, step first, then call this again. Reading ahead and decoding " +
   "future instructions statically is not supported because it is unreliable " +
-  "across M/X changes. Requires the emulator to be paused.",
+  "across M/X changes. Requires the emulator to be paused. At a labeled entry " +
+  "the response also carries a `comment`: the loaded symbol file's first-line " +
+  "comment for the function (mirror-canonicalised) -- a live drift-check against " +
+  "what the code is doing.",
   {},
   async () => ({
     content: [{

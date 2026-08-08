@@ -796,9 +796,15 @@ void BsnesApiServer::setupRoutes() {
         }
 
         if (hitBreakpoint) {
-            // The run loop already paused at the break. Stop the movie so it is not
-            // left armed to keep feeding input on a later /resume.
-            dispatch([]() { movie.stop(); }, /*blocking=*/true);
+            // The run loop already paused at the break. Leave the movie ARMED (do
+            // NOT stop it) so a subsequent /resume keeps feeding the recorded input
+            // and runs on to the next breakpoint. This lets a single playthrough stop
+            // at many breakpoints in sequence -- the natural way to walk a recorded
+            // trace, catching each arm in turn. Just make the paused state explicit.
+            dispatch([]() {
+                application.debug    = true;
+                application.debugrun = false;
+            }, /*blocking=*/true);
             sendJson(res, {
                 {"played",        path},
                 {"stopped",       "breakpoint"},

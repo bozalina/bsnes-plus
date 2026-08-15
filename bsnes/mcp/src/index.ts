@@ -707,3 +707,45 @@ server.tool(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// ── Harness-compat shim ──────────────────────────────────────────────────────
+// Some Claude Code builds double-JSON-encode SCALAR STRING tool arguments before
+// sending them (e.g. addr "C0F90B" arrives as the 8-char value "\"C0F90B\"",
+// source "cpu" as "\"cpu\""), which then fails schema validation. This reverses
+// exactly ONE extra JSON-string layer on any string leaf at any depth, and ONLY
+// when the value is unambiguously a JSON-encoded string (starts and ends with a
+// double-quote and parses to a string). It is a no-op on clean values, so it stays
+// correct after the harness bug is fixed. Arrays/numbers/objects are recursed into
+// but never reinterpreted.
+function unmangleToolArg(x: any): any {
+  if (typeof x === "string") {
+    if (x.length >= 2 && x.charCodeAt(0) === 0x22 && x.charCodeAt(x.length - 1) === 0x22) {
+      try {
+        const parsed = JSON.parse(x);
+        if (typeof parsed === "string") return parsed; // strip one encoding layer only
+      } catch { /* genuine string that merely starts/ends with a quote: leave it */ }
+    }
+    return x;
+  }
+  if (Array.isArray(x)) return x.map(unmangleToolArg);
+  if (x && typeof x === "object") {
+    const out: Record<string, any> = {};
+    for (const k of Object.keys(x)) out[k] = unmangleToolArg(x[k]);
+    return out;
+  }
+  return x;
+}
+{
+  const t = transport as any;
+  const deliver = t.onmessage;
+  if (typeof deliver === "function") {
+    t.onmessage = (message: any, ...rest: any[]) => {
+      try {
+        if (message && message.method === "tools/call" && message.params && message.params.arguments) {
+          message.params.arguments = unmangleToolArg(message.params.arguments);
+        }
+      } catch { /* never let the shim break message delivery */ }
+      return deliver.call(t, message, ...rest);
+    };
+  }
+}

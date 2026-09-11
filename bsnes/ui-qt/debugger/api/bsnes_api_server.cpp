@@ -11,6 +11,9 @@
 #include <iomanip>
 #include <stdexcept>
 #include <vector>
+#include <cstdio>
+#include <cstring>
+#include <cerrno>
 
 // ── Global singleton ─────────────────────────────────────────────────────────
 BsnesApiServer* bsnesApiServer = nullptr;
@@ -60,8 +63,23 @@ BsnesApiServer::~BsnesApiServer() {
 void BsnesApiServer::start(int port) {
     _svr.reset(new httplib::Server());
     setupRoutes();
-    _serverThread = std::thread([this, port]() {
-        _svr->listen("127.0.0.1", port);
+
+    // Bind on the calling (Qt main) thread, then run only the accept loop on the
+    // server thread. The combined listen() binds from inside the spawned thread;
+    // on some schedulers (observed under WSL2) that thread failed to bind before
+    // startup raced ahead, leaving the debug API silently unreachable because
+    // httplib swallows a bind failure. Binding here is deterministic, and the
+    // return value surfaces a real bind error instead of being lost.
+    if (!_svr->bind_to_port("127.0.0.1", port)) {
+        fprintf(stderr, "[bsnes-api] bind_to_port(127.0.0.1:%d) failed: %s\n",
+                port, std::strerror(errno));
+        fflush(stderr);
+        return;
+    }
+    fprintf(stderr, "[bsnes-api] listening on 127.0.0.1:%d\n", port); fflush(stderr);
+
+    _serverThread = std::thread([this]() {
+        _svr->listen_after_bind();
     });
 }
 

@@ -1,22 +1,12 @@
 void Application::init() {
   if(config().system.crashedOnLastRun == true) {
-    //emulator crashed on last run, disable all drivers
-    QMessageBox::warning(0, "bsnes Crash Notification", string() <<
-    "<p><b>Warning:</b><br>bsnes crashed while attempting to initialize device "
-    "drivers the last time it was run.</p>"
-    "<p>To prevent this from occurring again, all drivers have been disabled. Please "
-    "go to Settings->Configuration->Advanced and choose new driver settings, and then "
-    "restart the emulator for the changes to take effect. <i>Video, audio and input "
-    "will not work until you do this!</i></p>"
-    "<p><b>Settings that caused failure on last run:</b><br>"
-    << "Video driver: " << config().system.video << "<br>"
-    << "Audio driver: " << config().system.audio << "<br>"
-    << "Input driver: " << config().system.input << "<br></p>"
-    );
-
-    config().system.video = "None";
-    config().system.audio = "None";
-    config().system.input = "None";
+    //Previous run did not shut down cleanly (e.g. killed mid-init, or a driver
+    //init crash). This build is driven headlessly through the debugger API, so a
+    //blocking modal here would deadlock startup and prevent the API server from
+    //ever coming up. Log and continue -- the per-driver init checks below still
+    //fall back to "None" for any driver that genuinely fails to initialize.
+    fprintf(stderr, "[bsnes] previous run did not exit cleanly; continuing "
+                    "(a failing driver will fall back to None)\n");
   }
 
   // "Carbon" driver is retired, fallback to default if encountered in serialized settings
@@ -56,12 +46,8 @@ void Application::init() {
   video.set(Video::Handle, (uintptr_t)mainWindow->canvas->winId());
   video.set("QWidget", (QWidget*)mainWindow->canvas);
   if(video.init() == false) {
-    QMessageBox::warning(0, "bsnes", string() <<
-      "<p><b>Warning:</b> " << config().system.video << " video driver failed to initialize. "
-      "Video driver has been disabled.</p>"
-      "<p>Please go to Settings->Configuration->Advanced and choose a different driver, and "
-      "then restart the emulator for the changes to take effect.</p>"
-    );
+    fprintf(stderr, "[bsnes] %s video driver failed to initialize; using None.\n",
+            (const char*)config().system.video);
     video.driver("None");
     video.init();
   }
@@ -72,12 +58,8 @@ void Application::init() {
   audio.set(Audio::Latency, config().audio.latency);
   audio.set(Audio::Volume, config().audio.volume);
   if(audio.init() == false) {
-    QMessageBox::warning(0, "bsnes", string() <<
-      "<p><b>Warning:</b> " << config().system.audio << " audio driver failed to initialize. "
-      "Audio driver has been disabled.</p>"
-      "<p>Please go to Settings->Configuration->Advanced and choose a different driver, and "
-      "then restart the emulator for the changes to take effect.</p>"
-    );
+    fprintf(stderr, "[bsnes] %s audio driver failed to initialize; using None.\n",
+            (const char*)config().system.audio);
     audio.driver("None");
     audio.init();
   }
@@ -85,12 +67,8 @@ void Application::init() {
   input.driver(config().system.input);
   input.set("Handle", (uintptr_t)mainWindow->canvas->winId());
   if(input.init() == false) {
-    QMessageBox::warning(0, "bsnes", string() <<
-      "<p><b>Warning:</b> " << config().system.input << " input driver failed to initialize. "
-      "Input driver has been disabled.</p>"
-      "<p>Please go to Settings->Configuration->Advanced and choose a different driver, and "
-      "then restart the emulator for the changes to take effect.</p>"
-    );
+    fprintf(stderr, "[bsnes] %s input driver failed to initialize; using None.\n",
+            (const char*)config().system.input);
     input.driver("None");
     input.init();
   }

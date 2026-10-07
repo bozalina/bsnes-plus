@@ -117,7 +117,11 @@ server.tool(
 server.tool(
   "bsnes_resume",
   "Resume execution until the next breakpoint or step boundary. Returns " +
-  "immediately — use bsnes_get_status to poll for the next pause.",
+  "immediately — use bsnes_get_status to poll for the next pause. If someone " +
+  "frame-stepped the emulator from the UI since the last pause, the first resume " +
+  "can stop again at the next frame boundary (breakEvent None, no breakpoint " +
+  "consumed): compare the PC against bsnes_list_breakpoints and resume again " +
+  "before treating the pause as a hit.",
   {},
   async () => ({
     content: [{ type: "text", text: JSON.stringify(await api("POST", "/resume"), null, 2) }]
@@ -642,7 +646,10 @@ server.tool(
   "PC before reasoning. " +
   "Set once=true for a one-shot breakpoint that auto-removes itself the moment " +
   "it fires — ideal for confirming each of many paths exactly once without " +
-  "managing deletion, and it can't re-trap.",
+  "managing deletion, and it can't re-trap. A one-shot is consumed only when it " +
+  "FIRES: stepping onto its address with bsnes_step_into / bsnes_step_over leaves " +
+  "it armed, so it can fire later or stop a later step_over inside that routine — " +
+  "delete it with bsnes_delete_breakpoint after stepping across it.",
   {
     addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2' (or a 16-bit SPC700 address for APURAM/DSP)"),
     mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1)
@@ -657,7 +664,7 @@ server.tool(
       .default("Equal")
       .describe("Comparison operator for data condition (default Equal)"),
     once: z.boolean().default(false)
-      .describe("One-shot: auto-remove this breakpoint the moment it fires (default false)"),
+      .describe("One-shot: auto-remove this breakpoint the moment it fires; stepping onto its address does not consume it (default false)"),
   },
   async ({ addr, mode, source, addrEnd, data, compare, once }) => ({
     content: [{

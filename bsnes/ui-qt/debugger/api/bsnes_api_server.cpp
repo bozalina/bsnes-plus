@@ -843,6 +843,61 @@ void BsnesApiServer::setupRoutes() {
         sendJson(res, { {"played", path}, {"stopped", "completed"} });
     });
 
+    // ── GET /trace, POST /trace ──────────────────────────────────────────────
+    // The debugger's CPU "Trace" checkbox and "Enable trace mask" toolbar button.
+    // Toggled through the widgets themselves, so the UI
+    // shows the real state and the tracer is reached by the same signals a click sends.
+    // Must run on the Qt main thread.
+    static auto traceStateJson = []() -> json {
+        DebuggerView* cpu = debugger->debugCPU;
+        return {
+            {"enabled",         cpu->traceProcessor->isChecked()},
+            {"mask",            debugger->traceMask->defaultAction()->isChecked()},
+            {"listening",       tracer->isTraceServerListening()},
+            {"clientConnected", tracer->isTraceClientConnected()},
+        };
+    };
+
+    _svr->Get("/trace", [this](const httplib::Request&, httplib::Response& res) {
+        json result;
+        dispatch([&]() { result = traceStateJson(); }, /*blocking=*/true);
+        sendJson(res, result);
+    });
+
+    // Turning Trace on starts listening on port 27015 and returns at once; the trace
+    // client (Diz's live capture) connects afterwards. Turning it off first sends
+    // everything still queued to the client, then closes the socket, so the client
+    // reads the whole trace followed by EOF. The call blocks until that drain is done.
+    _svr->Post("/trace", [this](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { sendError(res, 400, "INVALID_BODY", "Expected JSON body."); return; }
+
+        for (const char* key : {"enabled", "mask"}) {
+            if (body.contains(key) && !body[key].is_boolean()) {
+                sendError(res, 400, "INVALID_PARAM",
+                          std::string("'") + key + "' must be a boolean."); return;
+            }
+        }
+        if (!body.contains("enabled") && !body.contains("mask")) {
+            sendError(res, 400, "MISSING_PARAM",
+                      "Provide at least one of 'enabled', 'mask'."); return;
+        }
+        // The tracer only listens while a cartridge is loaded.
+        if (body.value("enabled", false) && !requireLoaded(res)) return;
+
+        json result;
+        dispatch([&]() {
+            // Mask first, so it applies from the first traced instruction.
+            if (body.contains("mask"))
+                debugger->traceMask->defaultAction()->setChecked(body["mask"].get<bool>());
+            if (body.contains("enabled"))
+                debugger->debugCPU->traceProcessor->setChecked(body["enabled"].get<bool>());
+            result = traceStateJson();
+        }, /*blocking=*/true);
+        sendJson(res, result);
+    });
+
     // ── GET /cpu/registers ───────────────────────────────────────────────────
     _svr->Get("/cpu/registers", [this](const httplib::Request&, httplib::Response& res) {
         if (!requirePaused(res)) return;
@@ -1538,6 +1593,16 @@ void BsnesApiServer::setupRoutes() {
         }
       },
 
+      "TraceState": {
+        "type": "object",
+        "properties": {
+          "enabled":         { "type": "boolean", "description": "The CPU 'Trace' checkbox." },
+          "mask":            { "type": "boolean", "description": "The 'Enable trace mask' toolbar button." },
+          "listening":       { "type": "boolean", "description": "The trace socket is open on port 27015." },
+          "clientConnected": { "type": "boolean", "description": "A trace client has connected and is receiving the trace." }
+        }
+      },
+
       "SmpRegisters": {
         "type": "object",
         "description": "SPC700 (S-SMP) register values as uppercase hex strings.",
@@ -2007,6 +2072,43 @@ void BsnesApiServer::setupRoutes() {
           "408": { "description": "Movie did not finish within the time limit." },
           "409": { "description": "No cartridge loaded, or power is off." },
           "422": { "description": "Cartridge lacks save-state support, movie file not found, or the movie does not match the loaded cartridge." },
+          "503": { "$ref": "#/components/responses/NoCartridge" }
+        }
+      }
+    },
+
+    "/trace": {
+      "get": {
+        "summary": "Read the trace-log state",
+        "operationId": "getTrace",
+        "description": "Returns the debugger's CPU 'Trace' checkbox and the 'Enable trace mask' toolbar button, plus the trace socket's state: listening (Trace is on and port 27015 is open) and clientConnected (a trace client such as Diz's live capture has connected). Does not require paused.",
+        "responses": {
+          "200": { "description": "OK",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/TraceState" }
+                   }}}
+        }
+      },
+      "post": {
+        "summary": "Turn the trace log on or off",
+        "operationId": "setTrace",
+        "description": "Sets the debugger's trace controls exactly as clicking them would. Turning 'enabled' on starts listening on port 27015 and returns at once; the trace client connects afterwards, and emulation stalls only once the trace queues fill with no client to drain them. Turning it off first sends everything still queued to the client and then closes the socket, so the client reads the whole trace followed by EOF; the call blocks until that drain finishes. 'mask' is applied before 'enabled'. Turning 'mask' on, or turning 'enabled' on while 'mask' is on, clears the set of already-traced addresses. Omitted fields are left unchanged. Does not require paused.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "type": "object",
+              "properties": {
+                "enabled":       { "type": "boolean", "description": "The CPU 'Trace' checkbox." },
+                "mask":          { "type": "boolean", "description": "'Enable trace mask': trace each address only the first time it executes." }
+              }}
+          }}
+        },
+        "responses": {
+          "200": { "description": "The resulting state",
+                   "content": { "application/json": {
+                     "schema": { "$ref": "#/components/schemas/TraceState" }
+                   }}},
+          "400": { "description": "Malformed JSON body, a non-boolean field, or no field given." },
           "503": { "$ref": "#/components/responses/NoCartridge" }
         }
       }

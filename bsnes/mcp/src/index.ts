@@ -333,6 +333,50 @@ server.tool(
   })
 );
 
+// Trace log
+
+server.tool(
+  "bsnes_get_trace",
+  "Read the trace-log state: the debugger's CPU 'Trace' checkbox (enabled), the " +
+  "'Enable trace mask' toolbar button (mask), and the trace socket: listening (Trace " +
+  "is on and port 27015 is open) and clientConnected (a trace client such as Diz's " +
+  "live capture has connected). " +
+  "Does not require paused.",
+  {},
+  async () => ({
+    content: [{ type: "text", text: JSON.stringify(await api("GET", "/trace"), null, 2) }]
+  })
+);
+
+server.tool(
+  "bsnes_set_trace",
+  "Turn the CPU trace log on or off, exactly as clicking the debugger's controls does. " +
+  "enabled=true starts listening on port 27015 and returns at once; start the trace " +
+  "client (Diz's live capture) next, and confirm clientConnected with bsnes_get_trace " +
+  "before playing a movie. Emulation stalls if the trace queues fill with no client " +
+  "connected. enabled=false first sends everything still queued to the client, then " +
+  "closes the socket so the client sees the end of the trace; it blocks until that " +
+  "drain is done. mask is applied before enabled. The mask starts empty for every " +
+  "capture: turning mask on, or turning enabled on while mask is on, clears the set of " +
+  "already-traced addresses. Omitted fields are left unchanged. Does not require " +
+  "paused; enabling requires a loaded cartridge. Returns the resulting state.",
+  {
+    enabled: z.boolean().optional()
+      .describe("The CPU 'Trace' checkbox."),
+    mask: z.boolean().optional()
+      .describe("'Enable trace mask': trace each address only the first time it executes."),
+  },
+  async ({ enabled, mask }) => ({
+    content: [{
+      type: "text",
+      text: JSON.stringify(
+        await api("POST", "/trace", { enabled, mask }),
+        null, 2
+      )
+    }]
+  })
+);
+
 // CPU registers and disassembly
 
 server.tool(

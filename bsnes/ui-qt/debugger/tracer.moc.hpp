@@ -13,6 +13,10 @@ public:
   Tracer();
   ~Tracer();
 
+  // Socket output: listening for a client (Trace is on), and whether one has connected.
+  bool isTraceServerListening() { return traceServer.IsInitialized(); }
+  bool isTraceClientConnected() const { return traceServer.IsClientConnected(); }
+
 public slots:
   void setCpuTraceState(int);
   void setSmpTraceState(int);

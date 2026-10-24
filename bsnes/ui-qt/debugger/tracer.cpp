@@ -195,7 +195,15 @@ void Tracer::setTraceState(bool state) {
 }
 
 void Tracer::setCpuTraceState(int state) {
+  bool wasTracing = traceCpu;
   traceCpu = (state == Qt::Checked);
+
+  // Turning Trace on opens a new stream to a new client, which has seen none of what an
+  // earlier stream sent. Start with an empty mask so it gets every address at least once,
+  // as it would after restarting bsnes.
+  if (traceCpu && !wasTracing && traceMask)
+    setTraceMaskState(true);
+
   setTraceState(traceCpu);
 }
 

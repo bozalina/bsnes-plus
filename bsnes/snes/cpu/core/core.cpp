@@ -57,7 +57,6 @@ alwaysinline void CPUcore::op_io_cond6(uint16 addr) {
 }
 
 CPUcore::CPUcore() {
-  pendingWriteSource = 0xFFFFFFFF;
   initialize_opcode_table();
 }
 

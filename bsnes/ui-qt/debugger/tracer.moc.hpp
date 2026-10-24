@@ -19,7 +19,6 @@ public slots:
   void setSa1TraceState(int);
   void setSfxTraceState(int);
   void setSgbTraceState(int);
-  void setWramTracebackState(int);
   void setTraceMaskState(bool);
 
   void resetTraceState();
@@ -37,7 +36,6 @@ private:
   bool traceSa1;
   bool traceSfx;
   bool traceSgb;
-  bool traceWramBack;
   bool traceMask;
 
   uint8_t *traceMaskCPU;

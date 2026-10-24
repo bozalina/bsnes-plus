@@ -1,6 +1,5 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include "../../snes/cpu/wram_shadow.hpp"
 
 #include "../ui-base.hpp"
 
@@ -147,7 +146,7 @@ Debugger::Debugger() {
     symbolsDSP->loadFromFile(defaultSymbolsDSP);
   }
   
-  debugCPU = new DebuggerView(registerEditCPU, new CpuDisasmProcessor(CpuDisasmProcessor::CPU, symbolsCPU), true, true);
+  debugCPU = new DebuggerView(registerEditCPU, new CpuDisasmProcessor(CpuDisasmProcessor::CPU, symbolsCPU), true);
   debugSMP = new DebuggerView(registerEditSMP, new SmpDisasmProcessor(symbolsSMP));
   debugSA1 = new DebuggerView(registerEditSA1, new CpuDisasmProcessor(CpuDisasmProcessor::SA1, symbolsSA1));
   debugSFX = new DebuggerView(registerEditSFX, new SfxDisasmProcessor(symbolsSFX));
@@ -264,7 +263,6 @@ Debugger::Debugger() {
   connect(debugSGB, SIGNAL(synchronized()), this, SLOT(synchronize()));
 
   connect(debugCPU, SIGNAL(traceStateChanged(int)), tracer, SLOT(setCpuTraceState(int)));
-  connect(debugCPU, SIGNAL(wramTracebackStateChanged(int)), tracer, SLOT(setWramTracebackState(int)));
   connect(debugSMP, SIGNAL(traceStateChanged(int)), tracer, SLOT(setSmpTraceState(int)));
   connect(debugSA1, SIGNAL(traceStateChanged(int)), tracer, SLOT(setSa1TraceState(int)));
   connect(debugSFX, SIGNAL(traceStateChanged(int)), tracer, SLOT(setSfxTraceState(int)));

@@ -2,14 +2,13 @@ class DebuggerView : public QWidget {
   Q_OBJECT
 
 public:
-  DebuggerView(class RegisterEdit *registers, class DisasmProcessor *processor, bool step=false, bool enableWramTraceback=false);
+  DebuggerView(class RegisterEdit *registers, class DisasmProcessor *processor, bool step=false);
 
   QHBoxLayout *layout;
   QSplitter *consoleLayout;
   QVBoxLayout *controlLayout;
   QCheckBox *stepProcessor;
   QCheckBox *traceProcessor;
-  QCheckBox *wramTraceback;
   QPushButton *symbolsViewer;
   class QHexEdit *ramViewer;
   class SymbolsView *symbolsViewerDialog;
@@ -27,7 +26,6 @@ public slots:
 signals:
   void synchronized();
   void traceStateChanged(int);
-  void wramTracebackStateChanged(int);
 
 protected:
   void resizeEvent(QResizeEvent*);

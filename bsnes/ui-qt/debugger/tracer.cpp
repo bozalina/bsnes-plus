@@ -102,39 +102,13 @@ void Tracer::outputSgbTrace() {
 }
 
 void Tracer::stepCpu() {
-  if (!traceCpu) return;
-
-  uint32_t pc = SNES::cpu.regs.pc;
-
-#if defined(DEBUGGER)
-  if (traceWramBack) {
-    int32_t woff = wramOffset(pc);
-    if (woff >= 0) {
-      uint32_t romAddr = SNES::cpu.wramShadow[woff];
-      if (romAddr != SHADOW_SENTINEL && wramOffset(romAddr) < 0) {
-        if (!traceMask || !(traceMaskCPU[romAddr >> 3] & (0x80 >> (romAddr & 7)))) {
-          char buf[256]; int len;
-          if (traceOutputFormatIsText) {
-            SNES::cpu.disassemble_opcode(buf, romAddr, config().debugger.showHClocks);
-            len = strlen(buf) + 1;
-          } else {
-            SNES::cpu.disassemble_opcode_bin(buf, romAddr, len);
-          }
-          outputTrace(buf, len);
-        }
-        traceMaskCPU[romAddr >> 3] |= 0x80 >> (romAddr & 7);
-        return;
-      }
-      // WRAM PC with no ROM provenance — skip (data region, not copied code)
-      return;
+  if(traceCpu) {
+    unsigned addr = SNES::cpu.regs.pc;
+    if(!traceMask || !(traceMaskCPU[addr >> 3] & (0x80 >> (addr & 7)))) {
+        outputCpuTrace();
     }
+    traceMaskCPU[addr >> 3] |= 0x80 >> (addr & 7);
   }
-#endif
-
-  if (!traceMask || !(traceMaskCPU[pc >> 3] & (0x80 >> (pc & 7)))) {
-    outputCpuTrace();
-  }
-  traceMaskCPU[pc >> 3] |= 0x80 >> (pc & 7);
 }
 
 void Tracer::stepSmp() {
@@ -181,7 +155,6 @@ void Tracer::resetTraceState() {
   tracefile.close();
   traceServer.Shutdown();
 
-  SNES::cpu.resetWramShadow();
   setTraceState(traceCpu || traceSmp || traceSa1 || traceSfx || traceSgb);
 
   // reset trace masks
@@ -245,10 +218,6 @@ void Tracer::setSgbTraceState(int state) {
   setTraceState(traceSgb);
 }
 
-void Tracer::setWramTracebackState(int state) {
-  traceWramBack = (state == Qt::Checked);
-}
-
 void Tracer::setTraceMaskState(bool state) {
   traceMask = state;
   if(traceMask) {
@@ -267,7 +236,6 @@ Tracer::Tracer() {
   traceSa1 = false;
   traceSfx = false;
   traceSgb = false;
-  traceWramBack = false;
   traceMask = false;
 
   traceMaskCPU = new uint8_t[(1 << 24) >> 3]();

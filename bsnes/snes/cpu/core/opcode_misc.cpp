@@ -20,9 +20,7 @@ template<int adjust> void CPUcore::op_move_b() {
   regs.db = op_readpc();
   sp = op_readpc();
   rd.l = op_readlong((sp << 16) | regs.x.w);
-  pendingWriteSource = (sp << 16) | regs.x.w;
   op_writedbr(regs.y.w, rd.l);
-  pendingWriteSource = 0xFFFFFFFF;
   op_io();
   regs.x.l += adjust;
   regs.y.l += adjust;
@@ -34,9 +32,7 @@ template<int adjust> void CPUcore::op_move_w() {
   regs.db = op_readpc();
   sp = op_readpc();
   rd.l = op_readlong((sp << 16) | regs.x.w);
-  pendingWriteSource = (sp << 16) | regs.x.w;
   op_writedbr(regs.y.w, rd.l);
-  pendingWriteSource = 0xFFFFFFFF;
   op_io();
   regs.x.w += adjust;
   regs.y.w += adjust;

@@ -3,8 +3,6 @@
  * the usual snes/cpu/cpu.hpp. When this is the case, ALT_CPU_HPP is defined.
  * Be sure to test builds with multiple profiles and account for differences in the two implementations.
  */
-#include "../wram_shadow.hpp"
-
 class CPUDebugger : public CPU, public ChipDebugger {
 public:
   bool property(unsigned id, string &name, string &value);
@@ -49,7 +47,6 @@ public:
   };
   uint8 *usage;
   uint8 *cart_usage;
-  uint32_t *wramShadow;
 #if defined(ALT_CPU_HPP)
   uint8 mmio_read(unsigned addr);
   void mmio_write(unsigned addr, uint8 data);
@@ -68,17 +65,11 @@ public:
   uint8_t op_readpc();
   uint8 op_read(uint32 addr);
   uint8 dma_read(uint32 abus);
-  void dma_transfer(bool direction, uint8 bbus, uint32 abus);
   void op_write(uint32 addr, uint8 data);
 
   uint8 disassembler_read(uint32 addr);
   uint8 hvbjoy();
 
-  void resetWramShadow();
-
   CPUDebugger();
   ~CPUDebugger();
-
-private:
-  uint32_t resolveProvenance(uint32_t source);
 };

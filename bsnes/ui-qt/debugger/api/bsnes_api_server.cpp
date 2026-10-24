@@ -2042,7 +2042,7 @@ void BsnesApiServer::setupRoutes() {
       "post": {
         "summary": "Play back a recorded movie (.bsv)",
         "operationId": "playMovie",
-        "description": "Replays a recorded bsnes movie the way the UI's Play Movie does: loads the save state embedded at the start of the recording, then free-runs the emulator at real time while the recorded controller input is replayed, until the movie reaches EOF. Requires a loaded cartridge with power on that supports save states; the .bsv must match the loaded cartridge (CRC32). On EOF the emulator is paused at the movie's end (stopped='completed'). If a breakpoint fires during playback, playback stops and the emulator is left paused at the breakpoint (stopped='breakpoint' with break details). The call blocks for roughly the movie's wall-clock length.",
+        "description": "Replays a recorded bsnes movie the way the UI's Play Movie does: loads the save state embedded at the start of the recording, then free-runs the emulator at real time while the recorded controller input is replayed, until the movie reaches EOF. Requires a loaded cartridge with power on that supports save states; the .bsv must match the loaded cartridge (CRC32). On EOF the emulator is paused at the movie's end (stopped='completed'). If a breakpoint fires during playback, the emulator is left paused at the breakpoint (stopped='breakpoint' with break details) with the movie still armed: POST /resume continues it to the next breakpoint or to its end, where the emulator pauses again. The call blocks for roughly the movie's wall-clock length.",
         "requestBody": {
           "required": true,
           "content": { "application/json": {

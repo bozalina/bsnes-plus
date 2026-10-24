@@ -121,7 +121,10 @@ server.tool(
   "frame-stepped the emulator from the UI since the last pause, the first resume " +
   "can stop again at the next frame boundary (breakEvent None, no breakpoint " +
   "consumed): compare the PC against bsnes_list_breakpoints and resume again " +
-  "before treating the pause as a hit.",
+  "before treating the pause as a hit. Resuming a movie that stopped at a " +
+  "breakpoint keeps feeding its recorded input; when the movie runs out the " +
+  "emulator pauses at the end of that frame (breakEvent None), so a pause with no " +
+  "breakpoint hit after a movie resume can mean the movie ended.",
   {},
   async () => ({
     content: [{ type: "text", text: JSON.stringify(await api("POST", "/resume"), null, 2) }]
@@ -318,7 +321,9 @@ server.tool(
   ".bsv must have been recorded on the currently loaded cartridge (matched by CRC32). " +
   "If a breakpoint fires during playback, playback stops and the emulator is left " +
   "paused at the breakpoint (stopped='breakpoint' with the break details: " +
-  "breakpointHit, opcodeAddr, disasm, cpu). Because it plays in real time, the call " +
+  "breakpointHit, opcodeAddr, disasm, cpu); the movie stays armed, so bsnes_resume " +
+  "continues it to the next breakpoint or to its end, where the emulator pauses " +
+  "again. Because it plays in real time, the call " +
   "blocks for roughly the movie's length. Requires a loaded cartridge with power on " +
   "that supports save states.",
   {

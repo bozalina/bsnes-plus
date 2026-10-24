@@ -100,6 +100,15 @@ int16_t Movie::read() {
     mainWindow->syncUi();
     fp.close();
     utility.showMessage("Playback finished.");
+
+    // Pause in the debugger at the end of this frame rather than running on with
+    // live input, however playback was started or resumed.
+    application.debug    = true;
+    application.debugrun = false;
+    audio.clear();
+    #if defined(DEBUGGER)
+    debugger->synchronize();
+    #endif
   }
 
   return result;

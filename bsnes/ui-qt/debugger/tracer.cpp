@@ -170,7 +170,8 @@ void Tracer::ensureTraceOutputReady() {
     }
 
     if (traceOutputMediumIsSocket && !traceServer.IsInitialized()) {
-        // demo: this blocks the entire UI while waiting for a client to connect (not great, better ways to handle)
+        // Returns at once: the send thread waits for the client. Emulation only stalls
+        // once the queues fill with no client to drain them.
         traceServer.Init(DEFAULT_TRACE_SERVER_LISTEN_PORT);
     }
 }

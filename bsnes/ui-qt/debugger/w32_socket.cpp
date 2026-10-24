@@ -44,6 +44,7 @@ void SocketServer::Shutdown() {
     if (!ClientHadConnected())
         return;
 
+    _connected = false;
     SOCK_SHUTDOWN(_clientSocket);
     SOCK_CLOSE(_clientSocket);
     _clientSocket = INVALID_SOCK_VAL;
@@ -99,19 +100,39 @@ bool SocketServer::WaitForClientConnect(const char* servname) {
 }
 
 bool SocketServer::BlockAndWaitForClientConnect(socket_t listenSocket, bool enableAsyncIO) {
-    // TODO: blocks until a client connects. A better approach would pause emulation
-    // (but not the UI), then unpause when a client connects.
-    _clientSocket = accept(listenSocket, nullptr, nullptr);
+    // Poll instead of blocking in accept(), so RequestAbort() can cancel a wait for a
+    // client that never arrives. A thread parked in accept() can't be joined, and
+    // ThreadedSocketServer::Shutdown() joins from the UI thread.
+    while (!_abortRequested) {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(listenSocket, &readSet);
+        struct timeval timeout = { 0, 200 * 1000 };
 
-    if (_clientSocket == INVALID_SOCK_VAL) {
-        ReportError("accept() failed");
-        return false;
+        int ready = select((int)listenSocket + 1, &readSet, nullptr, nullptr, &timeout);
+        if (ready == SOCK_ERROR_VAL) {
+            if (SOCK_LAST_ERROR() == SOCK_INTERRUPTED)
+                continue;
+            ReportError("select() failed");
+            return false;
+        }
+        if (ready == 0)
+            continue;
+
+        _clientSocket = accept(listenSocket, nullptr, nullptr);
+        if (_clientSocket == INVALID_SOCK_VAL) {
+            ReportError("accept() failed");
+            return false;
+        }
+
+        if (enableAsyncIO)
+            EnableAsyncIO();
+
+        _connected = true;
+        return true;
     }
 
-    if (enableAsyncIO)
-        EnableAsyncIO();
-
-    return true;
+    return false;
 }
 
 bool SocketServer::DoOpen(const char *servname, socket_t &listenSocket, struct addrinfo *&result) {
@@ -134,6 +155,14 @@ bool SocketServer::DoOpen(const char *servname, socket_t &listenSocket, struct a
         ReportError("socket() failed");
         return false;
     }
+
+#ifndef _WIN32
+    // bsnes closes the connection first, so the port sits in TIME_WAIT for about a
+    // minute afterwards. Without SO_REUSEADDR, re-enabling Trace in that window fails bind().
+    // (Windows' SO_REUSEADDR means something else -- port sharing -- and isn't needed there.)
+    int reuse = 1;
+    setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+#endif
 
     if (bind(listenSocket, result->ai_addr, (int)result->ai_addrlen) == SOCK_ERROR_VAL) {
         ReportError("bind() failed");
@@ -220,7 +249,10 @@ void BufferedServer::Shutdown() {
     if (!_initialized)
         return;
 
-    FlushWorkingBuffer();
+    // With no client there's nobody to deliver the partial buffer to, and Push() could
+    // block forever on a full queue that nothing drains.
+    if (_thread.IsClientConnected())
+        FlushWorkingBuffer();
     _thread.Shutdown();
     _workingBuffer.Clear();
     _initialized = false;
@@ -254,6 +286,7 @@ bool ThreadedSocketServer::Init(const char *servName) {
         return false;
 
     _servName = servName;
+    _socketServer.ClearAbort();
     _compressThreadShouldContinue = true;
     _sendThreadShouldContinue     = true;
 
@@ -263,19 +296,48 @@ bool ThreadedSocketServer::Init(const char *servName) {
     return true;
 }
 
+// Drains rather than drops: everything already queued is compressed and sent before
+// the socket closes, so the client reads the whole trace and then a clean EOF.
+// With no client connected there's nobody to drain to, so the queues are discarded.
 void ThreadedSocketServer::Shutdown() {
-    _compressThreadShouldContinue = false;
-    _sendThreadShouldContinue     = false;
+    // Stop waiting for a client, whether none has connected yet or the current one drops
+    // mid-drain. An already-connected socket keeps sending.
+    _socketServer.RequestAbort();
 
-    // Wake any threads blocked on condition variables so they can observe the
-    // stop flags and exit cleanly.
+    if (!_socketServer.IsConnected())
+        _sendThreadShouldContinue = false;
+
+    // Stage 1: the compress thread finishes its queue (handing each packet to the send
+    // queue), then exits.
+    _compressThreadShouldContinue = false;
     _compressQueueItemAdded.notify_all();
     _compressQueueOKToAdd.notify_all();
+    _sendQueueOKToAdd.notify_all();
+    if (_compressThread.joinable()) _compressThread.join();
+
+    // Stage 2: the send thread finishes its queue, closes the socket, then exits.
+    _sendThreadShouldContinue = false;
     _sendQueueItemAdded.notify_all();
     _sendQueueOKToAdd.notify_all();
+    if (_sendThread.joinable()) _sendThread.join();
 
-    if (_compressThread.joinable()) _compressThread.join();
-    if (_sendThread.joinable())     _sendThread.join();
+    ClearQueues();
+}
+
+// Discards whatever a no-client shutdown left behind, so a later Init() starts empty.
+// Both worker threads have exited by the time this runs.
+void ThreadedSocketServer::ClearQueues() {
+    {
+        std::lock_guard<std::mutex> lock(_compressQueueMutex);
+        std::queue<ByteBuffer>().swap(_readyToCompressQueue);
+    }
+    {
+        std::lock_guard<std::mutex> lock(_sendQueueMutex);
+        while (!_readyToSendQueue.empty()) {
+            delete[] reinterpret_cast<const Bytef*>(std::get<1>(_readyToSendQueue.front()));
+            _readyToSendQueue.pop();
+        }
+    }
 }
 
 // Called from main thread (producer).
@@ -350,18 +412,28 @@ bool ThreadedSocketServer::ProcessNextCompressedItem() {
     packetBuffer[8] = (zlibCompressedDataSizeOut >> 24) & 0xFF;
 
     int len = headerSize + (int)zlibCompressedDataSizeOut;
-    return PushDecompressedData(reinterpret_cast<const uint8_t*>(packetBuffer), len);
+    if (!PushDecompressedData(reinterpret_cast<const uint8_t*>(packetBuffer), len)) {
+        delete[] packetBuffer;
+        return false;
+    }
+    return true;
 }
 
 // Called from compress thread. Queues a compressed packet for the send thread.
 bool ThreadedSocketServer::PushDecompressedData(const uint8_t *buffer, int len) {
     {
         std::unique_lock<std::mutex> lock(_sendQueueMutex);
-        _sendQueueOKToAdd.wait(lock, [this]{
+        // Also give up once shutdown is draining and the client has gone: nothing will
+        // empty the send queue. A dropped client doesn't signal this condition variable,
+        // so re-check on a timeout as well as on notify.
+        auto canProceed = [this]{
             return (int)_readyToSendQueue.size() < _maxQueueLengthAllowed
-                || !_sendThreadShouldContinue;
-        });
-        if (!_sendThreadShouldContinue)
+                || !_sendThreadShouldContinue
+                || (!_compressThreadShouldContinue && !_socketServer.IsConnected());
+        };
+        while (!_sendQueueOKToAdd.wait_for(lock, std::chrono::milliseconds(100), canProceed)) {}
+        if (!_sendThreadShouldContinue
+            || (int)_readyToSendQueue.size() >= _maxQueueLengthAllowed)
             return false;
         _readyToSendQueue.push(std::make_tuple(len, buffer));
     }
@@ -411,7 +483,9 @@ bool ThreadedSocketServer::SendBuffer(const uint8_t* buffer, int len) {
         if (shouldRetry)
             std::this_thread::sleep_for(std::chrono::microseconds(500));
 
-    } while (shouldRetry && _sendThreadShouldContinue);
+    // While draining at shutdown the stop flag is already down; keep retrying as long
+    // as the client is still there to receive.
+    } while (shouldRetry && (_sendThreadShouldContinue || _socketServer.IsConnected()));
 
     return sent;
 }
@@ -424,21 +498,17 @@ bool ThreadedSocketServer::WaitForSendQueueWrite() {
     return ProcessNextDecompressedItem();
 }
 
+// Both loops run until their stop flag is down AND their queue is empty (the
+// ProcessNext* calls return false only then, or on error), so Shutdown() drains them.
 void ThreadedSocketServer::CompressThreadMain() {
-    while (_compressThreadShouldContinue) {
-        if (!WaitForCompressQueueWrite())
-            break;
-    }
+    while (WaitForCompressQueueWrite()) {}
 }
 
 void ThreadedSocketServer::SendThreadMain() {
     if (!_socketServer.WaitForClientConnect(_servName.c_str()))
         return;
 
-    while (_sendThreadShouldContinue) {
-        if (!WaitForSendQueueWrite())
-            break;
-    }
+    while (WaitForSendQueueWrite()) {}
 
     _socketServer.Shutdown();
 }

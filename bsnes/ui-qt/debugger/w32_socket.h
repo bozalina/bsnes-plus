@@ -25,6 +25,7 @@
 #  define SOCK_WOULDBLOCK   WSAEWOULDBLOCK
 #  define SOCK_NOBUFS       WSAENOBUFS
 #  define SOCK_CONNRESET    WSAECONNRESET
+#  define SOCK_INTERRUPTED  WSAEINTR
 #  define SOCK_ERROR_VAL    SOCKET_ERROR
    static inline void sock_platform_init()    { WSADATA d; WSAStartup(MAKEWORD(2, 2), &d); }
    static inline void sock_platform_cleanup() { WSACleanup(); }
@@ -32,6 +33,7 @@
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <netdb.h>
+#  include <sys/select.h>
 #  include <sys/socket.h>
 #  include <unistd.h>
    typedef int socket_t;
@@ -42,6 +44,7 @@
 #  define SOCK_WOULDBLOCK   EWOULDBLOCK
 #  define SOCK_NOBUFS       ENOBUFS
 #  define SOCK_CONNRESET    ECONNRESET
+#  define SOCK_INTERRUPTED  EINTR
 #  define SOCK_ERROR_VAL    (-1)
    static inline void sock_platform_init()    {}
    static inline void sock_platform_cleanup() {}
@@ -76,8 +79,17 @@ public:
     bool Send(const uint8_t *buf, int len, bool &shouldRetryOut);
     bool ClientHadConnected() const;
 
+    // Thread-safe view of ClientHadConnected(), for threads other than the send thread.
+    inline bool IsConnected() const { return _connected; }
+
+    // Cancel any current or future wait for a client: WaitForClientConnect() returns false.
+    inline void RequestAbort() { _abortRequested = true; }
+    inline void ClearAbort()   { _abortRequested = false; }
+
 protected:
     socket_t _clientSocket = INVALID_SOCK_VAL;
+    std::atomic<bool> _connected{false};
+    std::atomic<bool> _abortRequested{false};
 
     bool DoOpen(const char *servname, socket_t &listenSocket, struct addrinfo *&result);
     void EnableAsyncIO() const;
@@ -92,6 +104,7 @@ public:
     void Shutdown();
 
     bool Push(ByteBuffer& byteBuffer);
+    inline bool IsClientConnected() const { return _socketServer.IsConnected(); }
 
     void CompressThreadMain();
     void SendThreadMain();
@@ -126,6 +139,7 @@ protected:
     bool WaitForCompressQueueWrite();
     bool WaitForSendQueueWrite();
     bool SendBuffer(const uint8_t* packetBuffer, int len);
+    void ClearQueues();
 };
 
 // Use this from the main thread
@@ -138,6 +152,7 @@ public:
     bool FlushWorkingBuffer();
 
     inline bool IsInitialized() { return _initialized; }
+    inline bool IsClientConnected() const { return _initialized && _thread.IsClientConnected(); }
 
 protected:
     ByteBuffer _workingBuffer;

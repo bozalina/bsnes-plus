@@ -674,7 +674,7 @@ server.tool(
   "it armed, so it can fire later or stop a later step_over inside that routine — " +
   "delete it with bsnes_delete_breakpoint after stepping across it.",
   {
-    addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2' (or a 16-bit SPC700 address for APURAM/DSP)"),
+    addr: z.string().describe("SNES address in hex, e.g. 'C0A3F2' (or a 16-bit SPC700 address for APURAM/DSP). A list -- addresses separated by commas or spaces, each optionally 'ADDR=N' to give that entry its own data value -- adds one breakpoint per entry with the other fields shared and returns {added: N}. For an Exec breakpoint on a conditional branch the data value selects a direction: 1 = fire only when the branch is about to be taken, 0 = only when it is not"),
     mode: z.array(z.enum(["Exec", "Read", "Write"])).min(1)
       .describe("When to trigger: Exec, Read, and/or Write"),
     source: z.enum(["CPUBus", "APURAM", "DSP", "VRAM", "OAM", "CGRAM"]).default("CPUBus")

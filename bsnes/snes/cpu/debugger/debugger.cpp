@@ -63,7 +63,20 @@ void CPUDebugger::op_step() {
         scheduler.exit(Scheduler::ExitReason::DebuggerEvent);
       }
     }
-    debugger.breakpoint_test(Debugger::Breakpoint::Source::CPUBus, Debugger::Breakpoint::Mode::Exec, regs.pc, 0x00);
+    if(debugger.breakpoint_possible(regs.pc)) {
+      // An Exec breakpoint's data value is matched against "this conditional branch is about to be
+      // taken": 1 = taken, 0 = not taken or not a conditional branch. With no data value set (-1) the
+      // breakpoint fires either way, as before. So data=1 catches one direction of a branch that
+      // runs every frame.
+      uint8 taken = 0;
+      uint8 opcode = disassembler_read(regs.pc);
+      if((opcode & 0x1f) == 0x10) {  //BPL BMI BVC BVS BCC BCS BNE BEQ
+        bool flag = (opcode >> 6) == 0 ? regs.p.n : (opcode >> 6) == 1 ? regs.p.v
+                  : (opcode >> 6) == 2 ? regs.p.c : regs.p.z;
+        taken = flag == (bool)(opcode & 0x20);
+      }
+      debugger.breakpoint_test(Debugger::Breakpoint::Source::CPUBus, Debugger::Breakpoint::Mode::Exec, regs.pc, taken);
+    }
   }
   if(step_event) step_event();
 

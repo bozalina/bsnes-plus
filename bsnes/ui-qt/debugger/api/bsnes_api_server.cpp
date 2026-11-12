@@ -1395,10 +1395,33 @@ void BsnesApiServer::setupRoutes() {
         }
         if (bp.mode == 0) { sendError(res, 400, "INVALID_MODE", "At least one mode is required."); return; }
 
-        // addr (optional, default 0)
+        // addr (optional, default 0). A list -- addresses separated by commas or spaces, each
+        // optionally "ADDR=N" to give that entry its own data value -- adds one breakpoint per
+        // entry with the other fields shared, and answers with a count instead of one record.
+        std::vector<std::pair<unsigned, int>> addrList;
+        bool isList = false;
         if (body.contains("addr") && body["addr"].is_string()) {
-            try { bp.addr = (unsigned)std::stoul(body["addr"].get<std::string>(), nullptr, 16); }
-            catch (...) { sendError(res, 400, "INVALID_PARAM", "Cannot parse addr."); return; }
+            std::string text = body["addr"].get<std::string>();
+            isList = text.find_first_of(", =") != std::string::npos;
+            if (!isList) {
+                try { bp.addr = (unsigned)std::stoul(text, nullptr, 16); }
+                catch (...) { sendError(res, 400, "INVALID_PARAM", "Cannot parse addr."); return; }
+            } else {
+                size_t pos = 0;
+                while (pos < text.size()) {
+                    size_t end = text.find_first_of(", ", pos);
+                    if (end == std::string::npos) end = text.size();
+                    std::string tok = text.substr(pos, end - pos);
+                    pos = end + 1;
+                    if (tok.empty()) continue;
+                    try {
+                        size_t eq = tok.find('=');
+                        unsigned a = (unsigned)std::stoul(tok.substr(0, eq), nullptr, 16);
+                        int d = eq == std::string::npos ? -2 : std::stoi(tok.substr(eq + 1));
+                        addrList.push_back({a, d});
+                    } catch (...) { sendError(res, 400, "INVALID_PARAM", "Cannot parse addr entry: " + tok); return; }
+                }
+            }
         }
 
         // addrEnd (optional)
@@ -1426,6 +1449,20 @@ void BsnesApiServer::setupRoutes() {
             else if (cmpStr == "Greater")      bp.compare = Cmp::Greater;
             else if (cmpStr == "GreaterEqual") bp.compare = Cmp::GreaterEqual;
             else { sendError(res, 400, "INVALID_COMPARE", "Unknown compare: " + cmpStr); return; }
+        }
+
+        if (isList) {
+            dispatch([this, bp, &addrList]() mutable {
+                for (auto& entry : addrList) {
+                    SNES::Debugger::Breakpoint one = bp;
+                    one.addr = entry.first;
+                    if (entry.second != -2) one.data = entry.second;
+                    SNES::debugger.breakpoint.append(one);
+                }
+                SNES::debugger.breakpoint_changed();
+            }, true);
+            sendJson(res, {{"added", (int)addrList.size()}}, 201);
+            return;
         }
 
         json result;

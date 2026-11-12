@@ -53,6 +53,11 @@ public:
   unsigned breakpoint_filter_count = 0;
   uint8 breakpoint_filter[0x10000];
   void breakpoint_filter_build();
+  // true when some breakpoint covers this low word (the list has to be walked)
+  bool breakpoint_possible(unsigned addr) {
+    if(!breakpoint_filter_valid || breakpoint_filter_count != breakpoint.size()) breakpoint_filter_build();
+    return breakpoint_filter[addr & 0xffff];
+  }
 
   bool step_cpu;
   bool step_smp;

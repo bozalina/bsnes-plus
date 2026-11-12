@@ -123,6 +123,7 @@ void BsnesApiServer::notifyBreak() {
         && SNES::debugger.breakpoint_hit < SNES::debugger.breakpoint.size()
         && SNES::debugger.breakpoint[SNES::debugger.breakpoint_hit].once) {
         SNES::debugger.breakpoint.remove(SNES::debugger.breakpoint_hit);
+        SNES::debugger.breakpoint_changed();
     }
 
     {
@@ -1430,6 +1431,7 @@ void BsnesApiServer::setupRoutes() {
         json result;
         dispatch([this, bp, &result]() mutable {
             SNES::debugger.breakpoint.append(bp);
+            SNES::debugger.breakpoint_changed();
             int idx = (int)SNES::debugger.breakpoint.size() - 1;
             result = breakpointToJson(idx, SNES::debugger.breakpoint[idx]);
         }, true);
@@ -1449,6 +1451,7 @@ void BsnesApiServer::setupRoutes() {
             found = true;
             result = breakpointToJson(idx, SNES::debugger.breakpoint[idx]);
             SNES::debugger.breakpoint.remove(idx);
+            SNES::debugger.breakpoint_changed();
         }, true);
         if (!found) { sendError(res, 404, "NOT_FOUND", "No breakpoint at index."); return; }
         sendJson(res, {{"deleted", result}});
@@ -1470,6 +1473,7 @@ void BsnesApiServer::setupRoutes() {
             dispatch([this, &cleared]() {
                 cleared = (int)SNES::debugger.breakpoint.size();
                 SNES::debugger.breakpoint.reset();
+                SNES::debugger.breakpoint_changed();
             }, true);
             sendJson(res, {{"cleared", cleared}});
             return;
@@ -1530,6 +1534,7 @@ void BsnesApiServer::setupRoutes() {
             // Remove back-to-front so earlier indices stay valid as we go.
             for (auto it = hits.rbegin(); it != hits.rend(); ++it)
                 SNES::debugger.breakpoint.remove(*it);
+            SNES::debugger.breakpoint_changed();
         }, true);
 
         if (deletedArr.empty()) {

@@ -214,6 +214,7 @@ QVariant BreakpointModel::headerData(int section, Qt::Orientation orientation, i
 bool BreakpointModel::setData(const QModelIndex &index, const QVariant &value, int role) {
   if (role == Qt::EditRole && index.row() < SNES::debugger.breakpoint.size()) {
     SNES::Debugger::Breakpoint& b = SNES::debugger.breakpoint[index.row()];
+    SNES::debugger.breakpoint_changed();
     
     switch (index.column()) {
     case BreakAddrStart: 
@@ -288,6 +289,7 @@ bool BreakpointModel::insertRows(int row, int count, const QModelIndex &parent) 
     beginInsertRows(parent, row, row + count - 1);
     while (count--)
       SNES::debugger.breakpoint.insert(row, SNES::Debugger::Breakpoint());
+    SNES::debugger.breakpoint_changed();
     endInsertRows();
     
     return true;
@@ -300,6 +302,7 @@ bool BreakpointModel::removeRows(int row, int count, const QModelIndex &parent) 
   if (!parent.isValid() && row <= rowCount() && count > 0) {
     beginRemoveRows(parent, row, row + count - 1);
     SNES::debugger.breakpoint.remove(row, count);
+    SNES::debugger.breakpoint_changed();
     endRemoveRows();
     
     return true;

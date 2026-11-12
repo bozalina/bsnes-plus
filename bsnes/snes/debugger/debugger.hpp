@@ -44,6 +44,16 @@ public:
   unsigned breakpoint_hit;
   void breakpoint_test(Breakpoint::Source source, Breakpoint::Mode mode, unsigned addr, uint8 data);
 
+  // breakpoint_test runs on every bus access, and matching only ever compares the low 16 bits of
+  // the accessed address against a breakpoint (the bank comes from the breakpoint, then mirrors).
+  // So one flag per low word rejects almost every access before the list is walked.
+  // Anything that adds, removes or edits a breakpoint must call breakpoint_changed().
+  void breakpoint_changed() { breakpoint_filter_valid = false; }
+  bool breakpoint_filter_valid = false;
+  unsigned breakpoint_filter_count = 0;
+  uint8 breakpoint_filter[0x10000];
+  void breakpoint_filter_build();
+
   bool step_cpu;
   bool step_smp;
   bool step_sa1;

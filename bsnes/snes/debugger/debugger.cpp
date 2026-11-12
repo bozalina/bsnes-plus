@@ -19,7 +19,26 @@ bool Debugger::Breakpoint::operator!=(const uint8& data) const {
   return !operator==(data);
 }
 
+void Debugger::breakpoint_filter_build() {
+  memset(breakpoint_filter, 0, sizeof breakpoint_filter);
+  for(unsigned i = 0; i < breakpoint.size(); i++) {
+    unsigned start = breakpoint[i].addr;
+    unsigned end = breakpoint[i].addr_end > start ? breakpoint[i].addr_end : start;
+    if(end - start >= 0xffff) {
+      memset(breakpoint_filter, 1, sizeof breakpoint_filter);
+      break;
+    }
+    for(unsigned a = start; a <= end; a++) breakpoint_filter[a & 0xffff] = 1;
+  }
+  breakpoint_filter_count = breakpoint.size();
+  breakpoint_filter_valid = true;
+}
+
 void Debugger::breakpoint_test(Debugger::Breakpoint::Source source, Debugger::Breakpoint::Mode mode, unsigned addr, uint8 data) {
+  // the size check is a second guard for a list change that missed breakpoint_changed()
+  if(!breakpoint_filter_valid || breakpoint_filter_count != breakpoint.size()) breakpoint_filter_build();
+  if(!breakpoint_filter[addr & 0xffff]) return;
+
   for(unsigned i = 0; i < breakpoint.size(); i++) {
 
     if((breakpoint[i].mode & (unsigned)mode) == 0) continue;

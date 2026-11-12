@@ -41,6 +41,9 @@ void Debugger::breakpoint_test(Debugger::Breakpoint::Source source, Debugger::Br
 
   for(unsigned i = 0; i < breakpoint.size(); i++) {
 
+    // a single-address breakpoint can only match an access with the same low word (see below);
+    // testing that first keeps the mirror lookup off every other entry
+    if(breakpoint[i].addr_end <= breakpoint[i].addr && ((breakpoint[i].addr ^ addr) & 0xffff)) continue;
     if((breakpoint[i].mode & (unsigned)mode) == 0) continue;
     if(breakpoint[i].source != source) continue;
     if(breakpoint[i] != data) continue;
